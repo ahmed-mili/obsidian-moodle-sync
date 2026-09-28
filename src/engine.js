@@ -439,7 +439,9 @@ async function siteInfo(client) {
 
 async function listCourses(client, userid, vaultRoot) {
 	const raw = await client.call('core_enrol_get_users_courses', { userid });
-	return locate(raw.map(parseCourse), vaultRoot);
+	// Ne garder que les vrais modules : les entrées sans code (Travail Personnel, WEI,
+	// Efrei For Good / Tech & Research Xperience, LXP, Student services…) n'en sont pas.
+	return locate(raw.map(parseCourse).filter((c) => c.code), vaultRoot);
 }
 
 // Recherche sur TOUT Moodle : un module existe parfois en plusieurs cohortes (PSA, BSA)
