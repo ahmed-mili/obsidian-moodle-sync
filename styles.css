@@ -1,0 +1,1151 @@
+/* Moodle Sync — la page du cours, rendue dans Obsidian.
+   Tokens remappés sur .ms-root (pas :root) : les variables natives vivent sur body. */
+
+/* ---------- la fenêtre : surface nette, aucun effet sur ce qui l'entoure ---------- */
+
+/* Pas de flou ni d'assombrissement du fond : le voile natif d'Obsidian suffit. */
+.modal-container:has(.moodle-sync-modal) .modal-bg {
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+
+.moodle-sync-modal {
+	/* La fenetre s'adapte : jamais plus haute que l'ecran, le contenu scrolle dedans. */
+	width: min(760px, 92vw);
+	max-height: min(86vh, 940px);
+	display: flex;
+	flex-direction: column;
+	background: var(--background-primary) !important;
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+	/* Agrandissement à l'ouverture : on part légèrement plus petit et plus bas. */
+	animation: ms-zoom-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes ms-zoom-in {
+	from { opacity: 0; transform: scale(0.94) translateY(8px); }
+	to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.moodle-sync-modal { animation: none; }
+}
+
+.moodle-sync-modal .ms-root {
+	--ms-text: var(--text-normal);
+	--ms-muted: var(--text-muted);
+	--ms-faint: var(--text-faint);
+	--ms-border: var(--background-modifier-border);
+	--ms-field: var(--background-modifier-form-field);
+	--ms-hover: var(--background-modifier-hover);
+	--ms-accent: var(--interactive-accent);
+	--ms-on-accent: var(--text-on-accent);
+	--ms-green: var(--color-green);
+	--ms-orange: var(--color-orange);
+	--ms-red: var(--color-red);
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	min-height: 0;
+	flex: 1;
+	overflow: hidden;
+}
+
+/* ---------- en-tête ---------- */
+
+.moodle-sync-modal .ms-head {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex: none;
+}
+
+.moodle-sync-modal .ms-title {
+	margin: 0;
+	font-family: "Neo Sans Std", var(--font-interface);
+	font-weight: 700;
+	font-size: 1.25em;
+	line-height: 1.3;
+	color: var(--ms-text);
+}
+
+.moodle-sync-modal .ms-hint {
+	margin: 0;
+	font-size: 0.88em;
+	line-height: 1.45;
+	color: var(--ms-muted);
+}
+
+/* !important : .theme-dark button (0,1,1) repeint fond, ombre et couleur. */
+.moodle-sync-modal .ms-back {
+	align-self: flex-start;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 6px 2px 2px;
+	background: transparent !important;
+	box-shadow: none !important;
+	border: none;
+	color: var(--ms-muted) !important;
+	font-size: 0.82em;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-back:hover {
+	color: var(--ms-text) !important;
+}
+
+.moodle-sync-modal .ms-back .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.moodle-sync-modal .ms-dest {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	flex: none;
+	padding: 7px 10px;
+	border-radius: var(--radius-m);
+	background: var(--ms-field);
+	border: 1px solid var(--ms-border);
+	color: var(--ms-muted);
+	font-size: 0.8em;
+}
+
+.moodle-sync-modal .ms-dest.is-warn {
+	color: var(--ms-orange);
+}
+
+.moodle-sync-modal .ms-dest .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.moodle-sync-modal .ms-dest-path {
+	font-family: var(--font-monospace);
+	overflow-wrap: anywhere;
+}
+
+/* ---------- saisie de l'URL ---------- */
+
+.moodle-sync-modal .ms-urlrow {
+	display: flex;
+	gap: 8px;
+}
+
+.moodle-sync-modal .ms-input {
+	flex: 1;
+	min-width: 0;
+	padding: 9px 12px;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: var(--ms-field);
+	color: var(--ms-text);
+	font-family: var(--font-monospace);
+	font-size: 0.82em;
+}
+
+.moodle-sync-modal .ms-input:focus {
+	outline: none;
+	border-color: color-mix(in srgb, var(--ms-accent) 55%, var(--ms-border));
+}
+
+.moodle-sync-modal .ms-status {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--ms-muted);
+	font-size: 0.85em;
+	line-height: 1.45;
+}
+
+.moodle-sync-modal .ms-status.is-error {
+	color: var(--ms-red);
+}
+
+/* ---------- arborescence du cours ---------- */
+
+.moodle-sync-modal .ms-sections {
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding-right: 4px;
+	scrollbar-color: var(--ms-border) transparent;
+}
+
+.moodle-sync-modal .ms-section-name {
+	margin-bottom: 8px;
+	padding-bottom: 6px;
+	border-bottom: 1px solid var(--ms-border);
+	color: var(--ms-text);
+	font-weight: 600;
+	font-size: 0.95em;
+}
+
+.moodle-sync-modal .ms-activity + .ms-activity {
+	margin-top: 10px;
+}
+
+.moodle-sync-modal .ms-act-head {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+}
+
+.moodle-sync-modal .ms-act-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 30px;
+	height: 30px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--ms-accent) 16%, transparent);
+	color: var(--ms-accent);
+}
+
+.moodle-sync-modal .ms-act-icon .svg-icon {
+	width: 16px;
+	height: 16px;
+}
+
+.moodle-sync-modal .ms-act-icon.is-assign,
+.moodle-sync-modal .ms-act-icon.is-forum,
+.moodle-sync-modal .ms-act-icon.is-quiz {
+	background: color-mix(in srgb, var(--ms-muted) 16%, transparent);
+	color: var(--ms-muted);
+}
+
+.moodle-sync-modal .ms-act-info {
+	min-width: 0;
+	padding-top: 2px;
+}
+
+.moodle-sync-modal .ms-act-name {
+	color: var(--ms-text);
+	font-weight: 500;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+}
+
+.moodle-sync-modal .ms-act-meta {
+	color: var(--ms-faint);
+	font-size: 0.78em;
+	line-height: 1.5;
+}
+
+/* ---------- fichiers ---------- */
+
+.moodle-sync-modal .ms-file {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 6px 0 0 40px;
+	padding: 8px 10px;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+}
+
+.moodle-sync-modal .ms-file.is-present {
+	background: transparent;
+	border-style: dashed;
+}
+
+.moodle-sync-modal .ms-file.is-outdated {
+	border-color: color-mix(in srgb, var(--ms-orange) 45%, var(--ms-border));
+}
+
+.moodle-sync-modal .ms-file.is-failed {
+	border-color: color-mix(in srgb, var(--ms-red) 50%, var(--ms-border));
+}
+
+.moodle-sync-modal .ms-file-icon {
+	display: flex;
+	flex: none;
+	color: var(--ms-muted);
+}
+
+.moodle-sync-modal .ms-file.is-present .ms-file-icon {
+	color: var(--ms-green);
+}
+
+.moodle-sync-modal .ms-file.is-failed .ms-file-icon {
+	color: var(--ms-red);
+}
+
+.moodle-sync-modal .ms-file-icon .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.moodle-sync-modal .ms-file-info {
+	flex: 1;
+	min-width: 0;
+}
+
+/* Nom complet visible : on retourne à la ligne plutôt que tronquer. */
+.moodle-sync-modal .ms-file-name {
+	color: var(--ms-text);
+	font-size: 0.85em;
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+}
+
+.moodle-sync-modal .ms-file.is-present .ms-file-name {
+	color: var(--ms-muted);
+}
+
+.moodle-sync-modal .ms-file-meta {
+	color: var(--ms-faint);
+	font-size: 0.75em;
+	line-height: 1.5;
+}
+
+.moodle-sync-modal .ms-file-action {
+	display: flex;
+	align-items: center;
+	flex: none;
+}
+
+.moodle-sync-modal .ms-badge {
+	padding: 3px 9px;
+	border-radius: 999px;
+	font-size: 0.72em;
+	white-space: nowrap;
+}
+
+.moodle-sync-modal .ms-badge.is-present {
+	background: color-mix(in srgb, var(--ms-green) 15%, transparent);
+	color: var(--ms-green);
+}
+
+/* ---------- état du dépôt d'un devoir ---------- */
+
+.moodle-sync-modal .ms-deposit {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 6px 0 0 40px;
+	padding: 8px 10px;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+}
+
+.moodle-sync-modal .ms-deposit.is-submitted {
+	background: transparent;
+	border-style: dashed;
+}
+
+/* 8 h ou moins avant la date limite, en retard ou fermé : rouge. */
+.moodle-sync-modal .ms-deposit.is-urgent {
+	border-color: color-mix(in srgb, var(--ms-red) 60%, var(--ms-border));
+	background: color-mix(in srgb, var(--ms-red) 10%, transparent);
+}
+
+.moodle-sync-modal .ms-deposit-icon {
+	display: flex;
+	flex: none;
+	color: var(--ms-muted);
+}
+
+.moodle-sync-modal .ms-deposit.is-submitted .ms-deposit-icon {
+	color: var(--ms-green);
+}
+
+.moodle-sync-modal .ms-deposit.is-urgent .ms-deposit-icon,
+.moodle-sync-modal .ms-deposit.is-urgent .ms-deposit-title {
+	color: var(--ms-red);
+}
+
+.moodle-sync-modal .ms-deposit-icon .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.moodle-sync-modal .ms-deposit-info {
+	flex: 1;
+	min-width: 0;
+}
+
+.moodle-sync-modal .ms-deposit-title {
+	color: var(--ms-text);
+	font-size: 0.85em;
+	line-height: 1.4;
+}
+
+.moodle-sync-modal .ms-deposit.is-submitted .ms-deposit-title {
+	color: var(--ms-muted);
+}
+
+.moodle-sync-modal .ms-deposit-meta {
+	color: var(--ms-faint);
+	font-size: 0.75em;
+	line-height: 1.5;
+	overflow-wrap: anywhere;
+}
+
+.moodle-sync-modal .ms-deposit-side {
+	display: flex;
+	align-items: center;
+	flex: none;
+}
+
+.moodle-sync-modal .ms-deposit.is-urgent .ms-ghost {
+	border-color: color-mix(in srgb, var(--ms-red) 60%, var(--ms-border));
+	color: var(--ms-red) !important;
+}
+
+/* ---------- boutons ---------- */
+
+.moodle-sync-modal .ms-ghost {
+	padding: 5px 12px;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-text) !important;
+	font-size: 0.78em;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-ghost:hover {
+	background: var(--ms-hover) !important;
+	border-color: var(--background-modifier-border-hover);
+}
+
+.moodle-sync-modal .ms-primary {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	padding: 8px 18px;
+	border: none;
+	border-radius: var(--radius-m);
+	background: var(--ms-accent) !important;
+	box-shadow: none !important;
+	color: var(--ms-on-accent) !important;
+	font-weight: 600;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-primary:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--ms-accent) 85%, white) !important;
+}
+
+.moodle-sync-modal .ms-primary:disabled {
+	background: var(--ms-field) !important;
+	color: var(--ms-muted) !important;
+	cursor: default;
+}
+
+.moodle-sync-modal .ms-btn-icon {
+	display: flex;
+}
+
+.moodle-sync-modal .ms-btn-icon .svg-icon {
+	width: 16px;
+	height: 16px;
+}
+
+/* ---------- liens externes + pied ---------- */
+
+.moodle-sync-modal .ms-external {
+	padding: 9px 12px;
+	border-radius: var(--radius-m);
+	background: var(--ms-field);
+	border: 1px solid var(--ms-border);
+	font-size: 0.78em;
+	color: var(--ms-muted);
+}
+
+.moodle-sync-modal .ms-external-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 500;
+}
+
+.moodle-sync-modal .ms-external-icon .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.moodle-sync-modal .ms-external ul {
+	margin: 6px 0 0;
+	padding-left: 22px;
+}
+
+.moodle-sync-modal .ms-external a {
+	overflow-wrap: anywhere;
+}
+
+.moodle-sync-modal .ms-footer {
+	display: flex;
+	justify-content: flex-end;
+	flex: none;
+	padding-top: 12px;
+	border-top: 1px solid var(--ms-border);
+}
+
+/* ---------- indicateur d'activité ---------- */
+
+.moodle-sync-modal .ms-spinner {
+	flex: none;
+	width: 14px;
+	height: 14px;
+	border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+	border-top-color: currentColor;
+	border-radius: 50%;
+	animation: ms-spin 0.7s linear infinite;
+}
+
+@keyframes ms-spin {
+	to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.moodle-sync-modal .ms-spinner { animation-duration: 2.4s; }
+}
+
+/* ---------- recherche de module ---------- */
+
+.moodle-sync-modal .ms-searchbar {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+	padding: 4px 4px 4px 12px;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: var(--ms-field);
+}
+
+.moodle-sync-modal .ms-searchbar:focus-within {
+	border-color: color-mix(in srgb, var(--ms-accent) 55%, var(--ms-border));
+}
+
+.moodle-sync-modal .ms-search-icon {
+	display: flex;
+	flex: none;
+	color: var(--ms-faint);
+}
+
+.moodle-sync-modal .ms-search-icon .svg-icon {
+	width: 16px;
+	height: 16px;
+}
+
+/* !important : .theme-dark input (0,1,1) réimposerait fond et bordure. */
+.moodle-sync-modal .ms-search {
+	flex: 1;
+	min-width: 0;
+	padding: 6px 0;
+	border: none !important;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-text);
+	font-size: 0.95em;
+}
+
+.moodle-sync-modal .ms-search:focus {
+	outline: none;
+}
+
+/* !important : .theme-dark button (0,1,1) repeint fond, ombre et couleur. */
+.moodle-sync-modal .ms-filter {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+	padding: 5px 10px;
+	border: none;
+	border-radius: calc(var(--radius-m) - 2px);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-muted) !important;
+	font-family: "Neo Sans Std", var(--font-interface);
+	font-weight: 700;
+	font-size: 0.76em;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-filter:hover {
+	background: var(--ms-hover) !important;
+	color: var(--ms-text) !important;
+}
+
+.moodle-sync-modal .ms-filter.is-active {
+	background: color-mix(in srgb, var(--ms-accent) 18%, transparent) !important;
+	color: var(--ms-accent) !important;
+}
+
+.moodle-sync-modal .ms-filter-icon {
+	display: flex;
+}
+
+.moodle-sync-modal .ms-filter-icon .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.moodle-sync-modal .ms-filter-menu {
+	position: absolute;
+	top: calc(100% + 6px);
+	right: 0;
+	z-index: 20;
+	min-width: 190px;
+	padding: 4px;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.moodle-sync-modal .ms-filter-option {
+	display: block;
+	width: 100%;
+	padding: 7px 10px;
+	border: none;
+	border-radius: calc(var(--radius-m) - 2px);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-text) !important;
+	font-size: 0.82em;
+	text-align: left;
+	white-space: normal !important;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-filter-option:hover {
+	background: var(--ms-hover) !important;
+}
+
+.moodle-sync-modal .ms-results {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding-right: 4px;
+	scrollbar-color: var(--ms-border) transparent;
+}
+
+/* !important : .theme-dark button (0,1,1) imposerait fond, ombre, centrage et nowrap. */
+.moodle-sync-modal .ms-course {
+	display: flex;
+	align-items: baseline;
+	gap: 12px;
+	width: 100%;
+	padding: 7px 10px;
+	border: none;
+	border-radius: var(--radius-m);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-text) !important;
+	justify-content: flex-start;
+	text-align: left;
+	white-space: normal !important;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-course:hover {
+	background: var(--ms-hover) !important;
+}
+
+/* --tc et --ic viennent de dashboard-tiles.css : mêmes couleurs et mêmes icônes
+   que les tuiles du Dashboard, une seule source de vérité. */
+.moodle-sync-modal .ms-course-icon {
+	flex: none;
+	width: 16px;
+	height: 16px;
+	background-color: rgb(var(--tc, 148, 163, 184));
+	-webkit-mask: var(--ic) center / contain no-repeat;
+	mask: var(--ic) center / contain no-repeat;
+	align-self: center;
+}
+
+.moodle-sync-modal .ms-course-code {
+	flex: none;
+	min-width: 74px;
+	color: rgb(var(--tc, 148, 163, 184));
+	font-family: "Neo Sans Std", var(--font-monospace);
+	font-weight: 700;
+	font-size: 0.84em;
+	letter-spacing: 0.01em;
+}
+
+.moodle-sync-modal .ms-course-code.is-orphan {
+	opacity: 0.55;
+}
+
+.moodle-sync-modal .ms-course:hover {
+	background: rgba(var(--tc, 148, 163, 184), 0.12) !important;
+}
+
+/* ---------- groupes par année ---------- */
+
+.moodle-sync-modal .ms-year + .ms-year {
+	margin-top: 16px;
+}
+
+.moodle-sync-modal .ms-year-name {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 4px;
+	padding: 0 10px 6px;
+	border-bottom: 1px solid var(--ms-border);
+	color: var(--ms-muted);
+	font-family: "Neo Sans Std", var(--font-interface);
+	font-weight: 700;
+	font-size: 0.76em;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+
+.moodle-sync-modal .ms-year-count {
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: var(--ms-field);
+	color: var(--ms-faint);
+	font-weight: 500;
+	letter-spacing: 0;
+}
+
+.moodle-sync-modal .ms-course-name {
+	flex: 1;
+	min-width: 0;
+	font-family: "Neo Sans Std", var(--font-interface);
+	font-weight: 700;
+	font-size: 0.86em;
+	line-height: 1.4;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.moodle-sync-modal .ms-empty {
+	padding: 14px 10px;
+	color: var(--ms-muted);
+	font-size: 0.85em;
+}
+
+.moodle-sync-modal .ms-footer-split {
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.moodle-sync-modal .ms-foot-tools {
+	display: flex;
+	gap: 14px;
+}
+
+/* !important : .theme-dark button (0,1,1) repeindrait ces liens en boutons pleins. */
+.moodle-sync-modal .ms-link {
+	padding: 0;
+	border: none;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-muted) !important;
+	font-size: 0.78em;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-link:hover {
+	color: var(--ms-accent) !important;
+	text-decoration: underline;
+}
+
+/* Recherche sur tout Moodle : proposée seulement quand la frappe est explicite. */
+.moodle-sync-modal .ms-searchall {
+	width: 100%;
+	margin-bottom: 10px;
+	padding: 8px 10px;
+	border: 1px dashed var(--ms-border);
+	border-radius: var(--radius-m);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-muted) !important;
+	font-size: 0.8em;
+	text-align: left;
+	white-space: normal !important;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-searchall:hover:not(:disabled) {
+	background: var(--ms-hover) !important;
+	color: var(--ms-text) !important;
+}
+
+.moodle-sync-modal .ms-course-cohort {
+	flex: none;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: var(--ms-field);
+	color: var(--ms-faint);
+	font-family: var(--font-monospace);
+	font-size: 0.68em;
+}
+
+/* ---------- badges de module : résultat de la pré-analyse ---------- */
+
+.moodle-sync-modal .ms-course-badge {
+	display: inline-flex;
+	align-items: center;
+	align-self: center;
+	gap: 4px;
+	flex: none;
+	padding: 2px 9px;
+	border-radius: 999px;
+	color: var(--ms-faint);
+	font-size: 0.72em;
+	white-space: nowrap;
+}
+
+/* Devoirs à rendre du module, à gauche de la pastille des fichiers. */
+.moodle-sync-modal .ms-course-deposit {
+	display: inline-flex;
+	align-items: center;
+	align-self: center;
+	gap: 4px;
+	flex: none;
+	padding: 2px 9px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--ms-orange) 16%, transparent);
+	color: var(--ms-orange);
+	font-size: 0.72em;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.moodle-sync-modal .ms-course-deposit:empty {
+	display: none;
+}
+
+.moodle-sync-modal .ms-course-deposit.is-urgent {
+	background: color-mix(in srgb, var(--ms-red) 18%, transparent);
+	color: var(--ms-red);
+}
+
+/* Dépôt ouvert depuis la dernière visite : point devant la pastille. */
+.moodle-sync-modal .ms-course-deposit.is-fresh::before {
+	content: "";
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+/* ---------- bandeau « À rendre » ---------- */
+
+.moodle-sync-modal .ms-dl-late {
+	color: var(--ms-red);
+	font-weight: 500;
+	font-size: 0.9em;
+}
+
+.moodle-sync-modal .ms-deadlines {
+	margin: 0 0 12px;
+	padding: 10px 12px;
+	border: 1px solid color-mix(in srgb, var(--ms-orange) 40%, var(--ms-border));
+	border-radius: var(--radius-m);
+	background: color-mix(in srgb, var(--ms-orange) 7%, transparent);
+}
+
+.moodle-sync-modal .ms-deadlines.is-urgent {
+	border-color: color-mix(in srgb, var(--ms-red) 55%, var(--ms-border));
+	background: color-mix(in srgb, var(--ms-red) 8%, transparent);
+}
+
+.moodle-sync-modal .ms-dl-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+	color: var(--ms-orange);
+	font-weight: 600;
+	font-size: 0.9em;
+}
+
+.moodle-sync-modal .ms-deadlines.is-urgent .ms-dl-head {
+	color: var(--ms-red);
+}
+
+.moodle-sync-modal .ms-dl-icon {
+	display: flex;
+}
+
+.moodle-sync-modal .ms-dl-icon .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.moodle-sync-modal .ms-dl-fresh,
+.moodle-sync-modal .ms-dl-new {
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--ms-accent) 18%, transparent);
+	color: var(--ms-accent);
+	font-size: 0.78em;
+	font-weight: 600;
+}
+
+.moodle-sync-modal .ms-dl-new {
+	margin-left: 8px;
+	font-size: 0.72em;
+}
+
+.moodle-sync-modal .ms-dl-list {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+/* Environ quatre lignes visibles par défaut ; poignée en bas pour agrandir à la souris. */
+.moodle-sync-modal .ms-dl-list.is-scroll {
+	height: 172px;
+	min-height: 64px;
+	max-height: 70vh;
+	overflow: auto;
+	overscroll-behavior: contain;
+	resize: vertical;
+}
+
+.moodle-sync-modal .ms-dl-item {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 3px 6px;
+	border-radius: var(--radius-s);
+	font-size: 0.85em;
+	line-height: 1.35;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-dl-item:hover {
+	background: var(--ms-hover);
+}
+
+.moodle-sync-modal .ms-dl-code {
+	flex: none;
+	width: 64px;
+	color: var(--ms-text);
+	font-family: "Neo Sans Std", var(--font-monospace);
+	font-weight: 700;
+}
+
+.moodle-sync-modal .ms-dl-name {
+	flex: 1;
+	min-width: 0;
+	color: var(--ms-text);
+	overflow-wrap: anywhere;
+}
+
+.moodle-sync-modal .ms-dl-when {
+	flex: none;
+	/* Largeur fixe (« sans date limite », le plus long) : « Déposer » et l'œil restent
+	   alignés d'une ligne à l'autre, quel que soit le délai affiché. */
+	min-width: 7.5em;
+	color: var(--ms-muted);
+	font-size: 0.9em;
+	white-space: nowrap;
+}
+
+.moodle-sync-modal .ms-dl-item.is-urgent .ms-dl-when,
+.moodle-sync-modal .ms-dl-item.is-late .ms-dl-when {
+	color: var(--ms-red);
+	font-weight: 600;
+}
+
+.moodle-sync-modal .ms-dl-hide {
+	display: flex;
+	align-items: center;
+	flex: none;
+	height: auto !important;
+	padding: 4px !important;
+	border: none;
+	border-radius: var(--radius-s);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-faint) !important;
+	font-size: 0.85em;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-dl-hide:hover {
+	background: var(--ms-hover) !important;
+	color: var(--ms-text) !important;
+}
+
+/* « Déposer » du bandeau : un simple lien souligné, sans cadre ni couleur d'alerte. */
+.moodle-sync-modal .ms-dl-send {
+	flex: none;
+	height: auto !important;
+	padding: 0 !important;
+	border: none;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-text) !important;
+	font-size: 0.9em;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-dl-send:hover {
+	color: var(--text-accent) !important;
+}
+
+/* Code et nom de la matière : même style, neutre. */
+.moodle-sync-modal .ms-dl-hide .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.moodle-sync-modal .ms-dl-module {
+	flex: 0 1 34%;
+	min-width: 0;
+	color: var(--ms-text);
+	font-family: "Neo Sans Std", var(--font-monospace);
+	font-weight: 700;
+	overflow-wrap: anywhere;
+}
+
+/* Devoir masqué (autre groupe…) : visible seulement sur demande, en retrait. */
+.moodle-sync-modal .ms-dl-item.is-masked {
+	opacity: 0.55;
+}
+
+.moodle-sync-modal .ms-dl-list.is-hidden-list {
+	margin-top: 4px;
+	padding-top: 4px;
+	border-top: 1px dashed var(--ms-border);
+}
+
+.moodle-sync-modal .ms-dl-tools {
+	display: flex;
+	gap: 14px;
+}
+
+.moodle-sync-modal .ms-deadlines.is-clear {
+	border-color: var(--ms-border);
+	background: transparent;
+}
+
+.moodle-sync-modal .ms-deadlines.is-clear .ms-dl-head {
+	color: var(--ms-green);
+}
+
+.moodle-sync-modal .ms-deposit-hide {
+	margin-right: 8px;
+}
+
+.moodle-sync-modal .ms-deposit.is-masked {
+	opacity: 0.6;
+}
+
+.moodle-sync-modal .ms-deposit-masked {
+	color: var(--ms-faint);
+}
+
+.moodle-sync-modal .ms-dl-more {
+	margin-top: 4px;
+	padding: 0 6px;
+	font-size: 0.8em;
+}
+
+.moodle-sync-modal .ms-course-badge:empty {
+	display: none;
+}
+
+.moodle-sync-modal .ms-course-badge .ms-spinner {
+	width: 12px;
+	height: 12px;
+}
+
+.moodle-sync-modal .ms-course-badge.is-new {
+	background: color-mix(in srgb, var(--ms-accent) 18%, transparent);
+	color: var(--ms-accent);
+	font-weight: 600;
+}
+
+.moodle-sync-modal .ms-course-badge.is-ok {
+	color: var(--ms-green);
+}
+
+.moodle-sync-modal .ms-course-badge.is-error {
+	background: color-mix(in srgb, var(--ms-red) 15%, transparent);
+	color: var(--ms-red);
+}
+
+.moodle-sync-modal .ms-course-badge.is-warn {
+	color: var(--ms-orange);
+}
+
+.moodle-sync-modal .ms-badge-icon {
+	display: flex;
+}
+
+.moodle-sync-modal .ms-badge-icon .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+
+/* ---------- pied de liste : outils + « Tout synchroniser » ---------- */
+
+.moodle-sync-modal .ms-foot-right {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 14px;
+}
+
+.moodle-sync-modal .ms-sync-all {
+	padding: 6px 14px;
+	font-size: 0.85em;
+}
+
+.moodle-sync-modal .ms-sync-all .ms-spinner {
+	width: 13px;
+	height: 13px;
+}
+
+/* ---------- connexion ---------- */
+
+.moodle-sync-modal .ms-connect {
+	display: flex;
+	justify-content: center;
+	padding: 18px 0 6px;
+}
+
+.moodle-sync-modal .ms-webview-host:empty {
+	display: none;
+}
+
+.moodle-sync-modal .ms-webview {
+	display: flex;
+	width: 100%;
+	height: min(560px, 60vh);
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	overflow: hidden;
+}
+
+/* ---------- échec d'un fichier ---------- */
+
+.moodle-sync-modal .ms-file-error {
+	color: var(--ms-red);
+}
