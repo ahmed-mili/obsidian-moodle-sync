@@ -16,7 +16,7 @@ Le jeton de connexion vit dans le `localStorage` local d'Obsidian (jamais dans l
 
 2. [Ajouter Moodle Sync](obsidian://brat?plugin=ahmed-mili/obsidian-moodle-sync) — clique directement sur **Ajouter Moodle Sync** : BRAT installe et active automatiquement le plugin.
 
-C'est fini. BRAT gardera le plugin à jour automatiquement à chaque nouvelle version.  https://obsidian://show-plugin?id=obsidian42-brat   https://github.com/ahmed-mili/obsidian-moodle-sync/releases/latest
+C'est fini. BRAT gardera le plugin à jour automatiquement à chaque nouvelle version.
 
 <details>
 <summary>Installation manuelle (sans BRAT)</summary>
