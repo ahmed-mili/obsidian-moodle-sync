@@ -12,22 +12,18 @@ Le jeton de connexion vit dans le `localStorage` local d'Obsidian (jamais dans l
 
 > Nécessite Obsidian **≥ 1.7.2** sur ordinateur (desktop).
 
-1. Installer BRAT : ) — clique directement sur **Installer BRAT**, puis sur *Installer* et *Activer* dans Obsidian.
+1. [Installer BRAT](obsidian://show-plugin?id=obsidian42-brat), puis choisir **Installer** et **Activer** dans Obsidian.
+2. [Ajouter Moodle Sync](obsidian://brat?plugin=ahmed-mili/obsidian-moodle-sync). Dans les paramètres de BRAT, on peut aussi choisir **Add beta plugin** et saisir `ahmed-mili/obsidian-moodle-sync`.
 
-```
-obsidian://show-plugin?id=obsidian42-brat
-```
+BRAT garde le plugin à jour à chaque nouvelle version. Si le plugin est déjà installé, utiliser **Check for updates** dans BRAT ; sa désinstallation n'est pas nécessaire.
 
-3. Ajouter Moodle Sync — clique directement sur **Ajouter Moodle Sync** : BRAT installe et active automatiquement le plugin.
+Sur chaque ordinateur, ouvrir Moodle Sync puis **Se connecter** avec son compte Efrei. La connexion, les favoris et les devoirs masqués restent propres à chaque appareil.
 
-```
-obsidian://brat?plugin=ahmed-mili/obsidian-moodle-sync
-```
+Les devoirs se masquent avec l'icône œil. Pour les réafficher, aller dans **Paramètres → Moodle Sync → Devoirs masqués**.
 
+### Installation manuelle
 
-C'est fini. BRAT gardera le plugin à jour automatiquement à chaque nouvelle version.
-
-
+Télécharger `main.js`, `manifest.json` et `styles.css` depuis la [dernière version](https://github.com/ahmed-mili/obsidian-moodle-sync/releases/latest), les placer dans `<vault>/.obsidian/plugins/moodle-sync/`, puis activer le plugin. Aucun fichier `engine.js` supplémentaire n'est nécessaire.
 
 ## Développement
 
@@ -35,6 +31,7 @@ Les sources vivent dans [`src/`](src/) : `src/main.js` (interface) charge `src/e
 
 ```bash
 node src/build.mjs   # régénère main.js (engine.js inliné) à la racine
+node --test src/test/*.test.js
 ```
 
 Le `main.js` à la racine est l'artefact construit — ne pas l'éditer à la main, éditer `src/` puis relancer le build.

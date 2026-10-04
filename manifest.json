@@ -1,7 +1,7 @@
 {
 	"id": "moodle-sync",
 	"name": "Moodle Sync",
-	"version": "2.2.0",
+	"version": "2.3.0",
 	"minAppVersion": "1.7.2",
 	"description": "Télécharge les fichiers de tes cours Moodle Efrei via l'API mobile et les range dans le dossier de chaque module ; suit les devoirs à rendre, leurs dates limites et le dépôt.",
 	"author": "Ahmed MILI",

@@ -41,6 +41,75 @@ function sanitize(name) {
 	return String(name).normalize('NFC').replace(/[<>:"/\\|?*\x00-\x1f]/g, '-').replace(/\s+/g, ' ').trim();
 }
 
+// ------------------------------------------------- noms propres des supports
+
+const MAX_STEM = 110;   // le chemin complet doit rester loin des 260 caractères de Windows
+
+// Nom Moodle -> { seance, stem } : sans code de module, sans « Etudiant », sans « _ ».
+// « XTI302-CYB-Seance2_TP_Socle_Etudiant.pdf » -> { seance: 2, stem: 'TP Socle' }.
+function cleanName(name) {
+	const ext = path.extname(name);
+	let stem = path.basename(name, ext);
+	stem = stem.replace(/^[A-Z]{2,5}-?\d{3}(?:-[A-Z]{2,5})?\s*-?\s*/, '');
+	let seance = null;
+	stem = stem.replace(/(?:^|[\s_-]+)s[eé]ance[\s_]*(\d+)(?=$|[\s_-])/i, (m, n) => {
+		seance = Number(n);
+		return ' ';
+	});
+	stem = stem
+		.replace(/(?:^|[\s_-]+)(?:version[\s_]+)?[eé]tudiant(?:e|es|s)?(?=$|[\s_-])/gi, ' ')
+		.replace(/[\s_-]+v\d+$/i, '')
+		.replace(/_/g, ' ')
+		.replace(/\s+-\s+$|^\s*-\s+/g, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+	return { seance, stem: stem || path.basename(name, ext) };
+}
+
+// Lignes de plus gros caractères de la 1re page -> titre, ou null s'il n'est pas fiable :
+// nom du module, police mal extraite (« informa9ques »), fragments de mots, titre tronqué.
+function pickTitle(lines, course = {}) {
+	let t = '';
+	for (const raw of lines || []) {
+		const l = String(raw).replace(/\s+/g, ' ').trim();
+		if (!l) continue;
+		// Ligne qui commence en minuscule : suite d'un titre trop long, pas un sous-titre.
+		t = !t ? l : /[-—–:]$/.test(t) || /^[-—–:]/.test(l) || /^\p{Ll}/u.test(l) ? `${t} ${l}` : `${t} - ${l}`;
+	}
+	t = t.normalize('NFC').replace(/[’]/g, "'").replace(/\s+/g, ' ').trim();
+	if (t.length < 6 || t.length > MAX_STEM) return null;
+	if (/[:]$/.test(t) || /intitulé du cours/i.test(t)) return null;
+	// Titre de partie (« Partie 1 - … », « I - … », « 1. … ») : pas le titre du document.
+	if (/^(?:partie\s*\d|[IVX]+\s*[-.–—]\s|\d+[.)]\s)/i.test(t)) return null;
+	if (/\b[A-Z]{2,5}-?\d{3}\b/.test(t)) return null;
+	// Titre fait surtout des mots du nom du module (page de garde commune à tous les CM).
+	const norm = (x) => x.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+	const courseWords = new Set(norm(String(course.name || '').replace(/^\S+\s*-\s*/, '')).match(/[a-z0-9]{3,}/g) || []);
+	const titleWords = norm(t).match(/[a-z0-9]{3,}/g) || [];
+	if (courseWords.size && titleWords.length
+		&& titleWords.filter((w) => courseWords.has(w)).length / titleWords.length >= 0.75) return null;
+	if (/\p{L}\d\p{L}/u.test(t)) return null;
+	const words = t.split(' ').filter((w) => /\p{L}/u.test(w));
+	const tiny = words.filter((w) => w.length <= 2 && !/^(?:TP|TD|CM|IA|à|a|de|du|le|la|et|en|un|l'|d')$/i.test(w));
+	if (!words.length || tiny.length / words.length > 0.25) return null;
+	return t;
+}
+
+// Nom final : « Séance 2 - TP Socle - Écrire ses premiers scripts shell.pdf ».
+function prettyName(name, title = null) {
+	const ext = path.extname(name);
+	const { seance, stem } = cleanName(name);
+	let base = title || stem;
+	// « TP4.pdf » + « Partie 1 - NumPy » : la référence courte du nom Moodle reste en tête.
+	const ref = /^(?:TP|TD|CM|DM|QCM)\s*\d+$/i.test(stem) ? stem : null;
+	const squash = (x) => x.replace(/\s+/g, '').toLowerCase();
+	if (title && ref && !squash(title).includes(squash(ref))) base = `${ref} - ${title}`;
+	if (seance != null && !/s[eé]ance\s*\d/i.test(base)) base = `Séance ${seance} - ${base}`;
+	base = sanitize(base).replace(/[. ]+$/, '');
+	if (base.length > MAX_STEM) base = base.slice(0, MAX_STEM).replace(/[\s-]+\S*$/, '');
+	return `${base}${ext.toLowerCase()}`;
+}
+
 function decodeEntities(s) {
 	// &amp; en dernier : « &amp;lt; » doit donner « &lt; », pas « < ».
 	return String(s || '').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'")
@@ -512,8 +581,10 @@ function fetchToFile(client, url, tmp, redirects = 0) {
 
 // Écrit d'abord un temporaire caché (invisible pour Obsidian, « *.tmp » exclu par Syncthing),
 // puis le renomme : un échec ne touche jamais au fichier existant.
-async function downloadOne(client, file, dir) {
-	const target = path.join(dir, file.name);
+// rename(tmp) : nom propre proposé (ou null). Il n'écrase jamais un autre fichier : en cas de
+// collision, on garde le nom Moodle. Sous 1 Ko, applyStatus ne retrouverait pas le fichier renommé.
+async function downloadOne(client, file, dir, rename = null) {
+	let target = path.join(dir, file.name);
 	const tmp = path.join(dir, `.${file.name}.moodle-sync.tmp`);
 	const url = new URL(file.url);
 	url.searchParams.set('token', client.token);
@@ -525,7 +596,15 @@ async function downloadOne(client, file, dir) {
 		}
 		// La date Moodle devient celle du fichier : c'est elle que compare localStatus.
 		if (file.timemodified) fs.utimesSync(tmp, file.timemodified, file.timemodified);
+		if (rename && size >= RENAMED_MIN_SIZE) {
+			let name = null;
+			try {
+				name = await rename(tmp, file);
+			} catch (e) { /* titre illisible : nom Moodle */ }
+			if (name && name !== file.name && !fs.existsSync(path.join(dir, name))) target = path.join(dir, name);
+		}
 		fs.renameSync(tmp, target);
+		return path.basename(target);
 	} catch (e) {
 		fs.rmSync(tmp, { force: true });
 		throw friendly(e);
@@ -534,14 +613,15 @@ async function downloadOne(client, file, dir) {
 
 // jobs : [{ file, dir, ... }]. 8 téléchargements simultanés au total, quel que soit le nombre
 // de modules ; onDone(job, erreur|null) après chacun.
+// job.rename : fonction de nommage (cf. downloadOne), seulement pour un fichier absent du disque.
 async function downloadFiles(client, jobs, onDone = () => {}) {
 	const limit = limiter(DOWNLOAD_CONCURRENCY);
 	return Promise.all(jobs.map((job) => limit(async () => {
 		try {
 			fs.mkdirSync(job.dir, { recursive: true });
-			await downloadOne(client, job.file, job.dir);
+			const saved = await downloadOne(client, job.file, job.dir, job.rename);
 			onDone(job, null);
-			return { ...job, ok: true };
+			return { ...job, ok: true, saved };
 		} catch (e) {
 			const err = friendly(e);
 			onDone(job, err);
@@ -552,7 +632,7 @@ async function downloadFiles(client, jobs, onDone = () => {}) {
 
 module.exports = {
 	ROOT, MoodleError, TokenError,
-	sanitize, decodeEntities, parseCourse, locate, flattenContents, dedupe,
+	sanitize, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
 	parseSubmission, depositState, formatRemaining, pendingDeposits, compareDeposits,
 	localStatus, allFiles, applyStatus, pending, summarize, uniqueJobs,
 	launchUrl, verifyLaunchToken, limiter,

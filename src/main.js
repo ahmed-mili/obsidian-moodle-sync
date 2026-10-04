@@ -1,6 +1,6 @@
 'use strict';
 
-const { Plugin, PluginSettingTab, Setting, Modal, Notice, setIcon } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Modal, Notice, setIcon, loadPdfJs } = require('obsidian');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -11,6 +11,7 @@ const TOKEN_KEY = 'moodle-sync-token';
 const COURSES_KEY = 'moodle-sync-courses';
 const SEEN_KEY = 'moodle-sync-seen-deposits';        // devoirs déjà vus : les autres sont « nouveaux »
 const IGNORED_KEY = 'moodle-sync-ignored-deposits';  // devoirs masqués du bandeau (autre groupe…)
+const FAVORITES_KEY = 'moodle-sync-favorite-courses'; // modules épinglés en tête de liste
 const COURSE_URL = /^https:\/\/moodle\.myefrei\.fr\/course\/view\.php\?(?:[^#]*&)?id=(\d+)/;
 
 // Icône Lucide par type d'activité Moodle : la fenêtre doit se lire comme la page du cours.
@@ -70,6 +71,41 @@ function depositFolder(course) {
 		return sub ? path.join(course.dest, sub.name) : course.dest;
 	} catch (_) {
 		return course.dest;
+	}
+}
+
+// Lignes écrites dans la plus grosse police de la 1re page d'un PDF, dans l'ordre de lecture.
+// pdf.js est celui qu'Obsidian embarque déjà (loadPdfJs).
+async function pdfTitleLines(file) {
+	const pdfjs = await loadPdfJs();
+	const doc = await pdfjs.getDocument({ data: new Uint8Array(fs.readFileSync(file)) }).promise;
+	try {
+		const page = await doc.getPage(1);
+		const { items } = await page.getTextContent();
+		const spans = items
+			.filter((it) => it.str && it.str.trim())
+			.map((it) => ({
+				str: it.str,
+				size: Math.round(Math.hypot(it.transform[2], it.transform[3]) * 2) / 2,
+				x: it.transform[4],
+				y: it.transform[5],
+				end: it.transform[4] + (it.width || 0),
+			}));
+		if (!spans.length) return [];
+		const max = Math.max(...spans.map((sp) => sp.size));
+		const lines = [];
+		for (const sp of spans.filter((x) => x.size >= max - 0.5)) {
+			const last = lines[lines.length - 1];
+			if (last && Math.abs(last.y - sp.y) < max * 0.5) {
+				// Les espaces ne sont souvent pas des caractères mais un écart entre deux blocs.
+				const gap = sp.x - last.end > sp.size * 0.15 && !/\s$/.test(last.text) && !/^\s/.test(sp.str);
+				last.text += (gap ? ' ' : '') + sp.str;
+				last.end = sp.end;
+			} else lines.push({ y: sp.y, end: sp.end, text: sp.str });
+		}
+		return lines.map((l) => l.text);
+	} finally {
+		doc.destroy();
 	}
 }
 
@@ -481,16 +517,23 @@ class MoodleSyncModal extends Modal {
 			return;
 		}
 
-		// Regroupement par année, la plus récente en premier (comme le Dashboard).
+		// Les favoris forment un groupe à part, tout en haut ; ensuite regroupement par année,
+		// la plus récente en premier (comme le Dashboard).
+		const favorites = this.plugin.favoriteCourses();
+		const favHits = hits.filter((co) => favorites.has(co.id));
 		const groups = new Map();
 		for (const co of hits) {
+			if (favorites.has(co.id)) continue;
 			const key = co.yearLabel || 'Année inconnue';
 			if (!groups.has(key)) groups.set(key, []);
 			groups.get(key).push(co);
 		}
-		for (const [year, list] of [...groups.entries()].sort((a, b) => b[0].localeCompare(a[0], 'fr'))) {
+		const ordered = [...groups.entries()].sort((a, b) => b[0].localeCompare(a[0], 'fr'));
+		if (favHits.length) ordered.unshift(['Favoris', favHits]);
+		for (const [year, list] of ordered) {
 			const g = this.results.createDiv({ cls: 'ms-year' });
 			const h = g.createDiv({ cls: 'ms-year-name' });
+			if (list === favHits) setIcon(h.createSpan({ cls: 'ms-year-icon' }), 'star');
 			h.createSpan({ text: year });
 			h.createSpan({ cls: 'ms-year-count', text: String(list.length) });
 			for (const co of list.sort((a, b) => (a.code || 'zz').localeCompare(b.code || 'zz', 'fr'))) {
@@ -506,6 +549,21 @@ class MoodleSyncModal extends Modal {
 				if (twins && co.cohort) row.createSpan({ cls: 'ms-course-cohort', text: co.cohort });
 				const deposit = row.createSpan({ cls: 'ms-course-deposit' });
 				const badge = row.createSpan({ cls: 'ms-course-badge' });
+				// span et non button : un bouton ne peut pas en contenir un autre.
+				const fav = favorites.has(co.id);
+				const star = row.createSpan({
+					cls: `ms-course-star${fav ? ' is-on' : ''}`,
+					attr: { role: 'button', tabindex: '0', 'aria-label': fav ? 'Retirer des favoris' : 'Ajouter aux favoris' },
+				});
+				setIcon(star, 'star');
+				const toggle = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					this.plugin.setFavorite(co.id, !fav);
+					this.paint();
+				};
+				star.addEventListener('click', toggle);
+				star.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') toggle(e); });
 				this.rows.set(co.id, { badge, deposit, course: co });
 				this.paintBadge(co.id);
 				row.addEventListener('click', () => this.onRowClick(co));
@@ -562,11 +620,10 @@ class MoodleSyncModal extends Modal {
 		}
 		const order = this.engine.compareDeposits;
 		const all = this.visible().flatMap((co) => this.depositsOf(co)).sort(order);
-		const hidden = this.visible().flatMap((co) => this.depositsOf(co, true)).sort(order);
 		// Le bandeau est repeint à chaque module vérifié : garder la position de défilement.
 		const scrolled = box.querySelector('.ms-dl-list')?.scrollTop || 0;
 		box.empty();
-		if (!all.length && !hidden.length) {
+		if (!all.length) {
 			box.hide();
 			return;
 		}
@@ -591,33 +648,14 @@ class MoodleSyncModal extends Modal {
 		// La hauteur choisie à la poignée (resize vertical) survit aux repeints du bandeau.
 		if (this.dlHeight) list.style.height = this.dlHeight;
 		list.addEventListener('mouseup', () => { if (list.style.height) this.dlHeight = list.style.height; });
-		for (const d of all) this.renderDeadline(list, d, false);
+		for (const d of all) this.renderDeadline(list, d);
 		list.scrollTop = scrolled;
-
-		const tools = box.createDiv({ cls: 'ms-dl-tools' });
-		if (hidden.length) {
-			const toggle = tools.createEl('button', {
-				cls: 'ms-link ms-dl-more',
-				text: this.showHiddenDeadlines
-					? 'Cacher les devoirs masqués'
-					: `${hidden.length} devoir${hidden.length > 1 ? 's' : ''} masqué${hidden.length > 1 ? 's' : ''}`,
-			});
-			toggle.addEventListener('click', (e) => {
-				e.stopPropagation();
-				this.showHiddenDeadlines = !this.showHiddenDeadlines;
-				this.paintDeadlines();
-			});
-			if (this.showHiddenDeadlines) {
-				const hl = box.createDiv({ cls: 'ms-dl-list is-hidden-list' });
-				for (const d of hidden) this.renderDeadline(hl, d, true);
-			}
-		}
-		if (!tools.childElementCount) tools.remove();
 	}
 
-	// Une ligne du bandeau. masked : devoir masqué, affiché avec « Réafficher ».
-	renderDeadline(list, d, masked) {
-		const row = list.createDiv({ cls: `ms-dl-item is-${d.state}${masked ? ' is-masked' : ''}` });
+	// Une ligne du bandeau. L'icône œil masque un devoir ; le réaffichage se fait uniquement
+	// depuis les paramètres du plugin (liste des devoirs masqués).
+	renderDeadline(list, d) {
+		const row = list.createDiv({ cls: `ms-dl-item is-${d.state}` });
 		row.createSpan({ cls: 'ms-dl-code', text: d.course.code || '—' });
 		// Nom complet de la matière, comme dans la liste des modules.
 		row.createSpan({ cls: 'ms-dl-module', text: d.course.name.replace(/^\S+\s*-\s*/, '') });
@@ -638,12 +676,12 @@ class MoodleSyncModal extends Modal {
 		row.createSpan({ cls: 'ms-dl-when', text: when });
 		const btn = row.createEl('button', {
 			cls: 'ms-dl-hide',
-			attr: { 'aria-label': masked ? 'Réafficher ce devoir' : 'Masquer ce devoir' },
+			attr: { 'aria-label': 'Masquer ce devoir' },
 		});
-		setIcon(btn, masked ? 'eye-off' : 'eye');
+		setIcon(btn, 'eye');
 		btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			this.plugin.setDepositHidden(d.id, !masked);
+			this.plugin.setDepositHidden(d.id, true);
 			this.paintDeadlines();
 			this.paintRowDeposit(d.course.id);
 		});
@@ -927,29 +965,54 @@ class MoodleSyncModal extends Modal {
 		}
 
 		this.footer = c.createDiv({ cls: 'ms-footer' });
+		this.renameBtn = this.footer.createEl('button', { cls: 'ms-ghost ms-rename' });
+		this.renameBtn.addEventListener('click', () => this.renameExisting());
 		this.allBtn = this.footer.createEl('button', { cls: 'ms-primary ms-all' });
 		this.allBtn.addEventListener('click', () => this.download(this.engine.pending(this.shown)));
 		this.refreshFooter();
 	}
 
+	// Devoirs masqués (autre groupe) : absents de cette liste, réaffichables uniquement
+	// depuis les paramètres du plugin.
 	renderSection(parent, sec) {
+		const acts = sec.activities.filter((a) => !this.isMasked(a));
+		if (!acts.length) return;
 		const el = parent.createDiv({ cls: 'ms-section' });
 		el.createDiv({ cls: 'ms-section-name', text: sec.name });
-		for (const act of sec.activities) this.renderActivity(el, act);
+		for (const act of acts) this.renderActivity(el, act);
 	}
 
+	isMasked(act) {
+		return !!act.deposit && this.plugin.ignoredDeposits().has(act.id);
+	}
+
+	// Redessine le module en gardant la position de lecture.
+	redrawCourse() {
+		const top = this.list ? this.list.scrollTop : 0;
+		this.renderCourse(this.shown);
+		this.list.scrollTop = top;
+	}
+
+	// Une ligne par fichier : un support seul ne répète pas le nom de son activité. Une
+	// activité à plusieurs fichiers (dossier) garde un intitulé au-dessus de ses lignes ; une
+	// activité sans fichier (forum, test, devoir) tient sur une ligne, son type à droite.
 	renderActivity(parent, act) {
-		const el = parent.createDiv({ cls: 'ms-activity' });
-		const head = el.createDiv({ cls: 'ms-act-head' });
-		const icon = head.createDiv({ cls: `ms-act-icon is-${act.type}` });
-		setIcon(icon, TYPE_ICON[act.type] || 'circle-dot');
-		const info = head.createDiv({ cls: 'ms-act-info' });
-		info.createDiv({ cls: 'ms-act-name', text: act.name });
-		const sub = info.createDiv({ cls: 'ms-act-meta' });
-		sub.createSpan({ text: TYPE_LABEL[act.type] || act.type });
-		if (!act.files.length && !act.external.length && !act.deposit) sub.createSpan({ cls: 'ms-act-empty', text: ' · aucun fichier' });
+		const el = parent.createDiv({ cls: `ms-activity is-${act.type}` });
+		if (act.files.length === 1 && !act.deposit) {
+			this.renderFile(el, act.files[0]);
+			return;
+		}
+		const row = el.createDiv({ cls: 'ms-row ms-act-row' });
+		setIcon(row.createDiv({ cls: `ms-row-icon ms-act-icon is-${act.type}` }), TYPE_ICON[act.type] || 'circle-dot');
+		const info = row.createDiv({ cls: 'ms-row-info' });
+		info.createDiv({ cls: 'ms-row-name', text: act.name });
+		if (act.files.length > 1) info.createDiv({ cls: 'ms-row-meta', text: `${act.files.length} fichiers` });
+		row.createDiv({ cls: 'ms-row-type', text: TYPE_LABEL[act.type] || act.type });
 		if (act.deposit) this.renderDeposit(el, act);
-		for (const f of act.files) this.renderFile(el, f);
+		if (act.files.length) {
+			const group = el.createDiv({ cls: 'ms-act-files' });
+			for (const f of act.files) this.renderFile(group, f);
+		}
 	}
 
 	// État du dépôt d'un devoir. Jamais de bouton de téléchargement ici : le rendu est déjà
@@ -1010,17 +1073,16 @@ class MoodleSyncModal extends Modal {
 			el.meta.setText('Pas de date limite');
 		}
 		if (st.state === 'closed') return;
-		const masked = this.plugin.ignoredDeposits().has(act.id);
-		el.row.toggleClass('is-masked', masked);
-		if (masked) el.title.createSpan({ cls: 'ms-deposit-masked', text: ' · masqué' });
+		// Un devoir masqué est filtré en amont (renderSection) : ce bouton ne fait donc que
+		// masquer. Le réaffichage se fait uniquement depuis les paramètres du plugin.
 		const hide = el.side.createEl('button', {
 			cls: 'ms-dl-hide ms-deposit-hide',
-			attr: { 'aria-label': masked ? 'Réafficher ce devoir dans « À rendre »' : 'Masquer ce devoir de « À rendre »' },
+			attr: { 'aria-label': 'Masquer ce devoir de « À rendre »' },
 		});
-		setIcon(hide, masked ? 'eye-off' : 'eye');
+		setIcon(hide, 'eye');
 		hide.addEventListener('click', () => {
-			this.plugin.setDepositHidden(act.id, !masked);
-			this.paintDeposit(act);
+			this.plugin.setDepositHidden(act.id, true);
+			this.redrawCourse();
 		});
 		const b = el.side.createEl('button', { cls: 'ms-ghost', text: 'Déposer sur Moodle' });
 		b.addEventListener('click', () => {
@@ -1043,54 +1105,112 @@ class MoodleSyncModal extends Modal {
 	}
 
 	renderFile(parent, f) {
-		const row = parent.createDiv({ cls: 'ms-file' });
-		const icon = row.createDiv({ cls: 'ms-file-icon' });
-		const info = row.createDiv({ cls: 'ms-file-info' });
-		// Nom complet, jamais tronqué : c'est le nom réel sur le disque.
-		info.createDiv({ cls: 'ms-file-name', text: f.name });
-		const meta = info.createDiv({ cls: 'ms-file-meta' });
-		const bits = [];
-		if (f.size) bits.push(humanSize(f.size));
-		if (f.timemodified) bits.push(new Date(f.timemodified * 1000).toLocaleDateString('fr-FR'));
-		meta.createSpan({ text: bits.join(' · ') });
+		const row = parent.createDiv({ cls: 'ms-row ms-file' });
+		const icon = row.createDiv({ cls: 'ms-row-icon ms-file-icon' });
+		const info = row.createDiv({ cls: 'ms-row-info' });
+		// Nom complet, jamais tronqué : c'est le nom (réel ou à venir) sur le disque.
+		const name = info.createDiv({ cls: 'ms-row-name ms-file-name' });
+		const meta = info.createDiv({ cls: 'ms-row-meta ms-file-meta' });
 		const badge = row.createDiv({ cls: 'ms-file-action' });
-		this.fileEls.set(f, { row, icon, badge, meta, error: null });
+		this.fileEls.set(f, { row, icon, name, badge, meta });
 		this.paintFileAction(f);
+	}
+
+	// Nom affiché : celui du disque pour un fichier présent, sinon le nom propre qu'il recevra
+	// (le titre du PDF, lu au téléchargement, peut encore l'affiner).
+	displayName(f) {
+		if (f.status === 'present' || f.status === 'outdated') return path.basename(f.localName || f.name);
+		return this.engine.prettyName(f.name);
 	}
 
 	paintFileAction(f) {
 		const el = this.fileEls.get(f);
 		if (!el) return;
-		el.row.className = `ms-file is-${f.status}`;
+		el.row.className = `ms-row ms-file is-${f.status}`;
 		el.icon.empty();
 		el.badge.empty();
-		if (el.error) {
-			el.error.remove();
-			el.error = null;
-		}
+		el.meta.empty();
+		const shown = this.displayName(f);
+		el.name.setText(shown);
+		const bits = [];
+		if (shown !== f.name) bits.push(f.name);
+		if (f.size) bits.push(humanSize(f.size));
+		if (f.timemodified) bits.push(new Date(f.timemodified * 1000).toLocaleDateString('fr-FR'));
+		el.meta.setText(bits.join(' · '));
+		const ext = path.extname(f.name).toLowerCase();
+		const typeIcon = /^\.(zip|rar|7z|tar|gz)$/.test(ext) ? 'file-archive'
+			: /^\.(png|jpe?g|gif|svg|webp)$/.test(ext) ? 'file-image'
+				: /^\.(py|js|c|cpp|java|sh|ps1|sql|html|css|ipynb)$/.test(ext) ? 'file-code'
+					: /^\.(xlsx?|csv|ods)$/.test(ext) ? 'file-spreadsheet' : 'file-text';
 
 		if (f.status === 'present') {
-			setIcon(el.icon, 'check');
-			el.badge.createSpan({ cls: 'ms-badge is-present', text: 'Déjà présent' });
+			setIcon(el.icon, typeIcon);
+			this.addOpenButton(el.badge, f);
 			return;
 		}
 		if (f.status === 'busy') {
 			setIcon(el.icon, 'download');
 			el.badge.createDiv({ cls: 'ms-spinner' });
+			el.badge.createSpan({ cls: 'ms-busy-label', text: 'Téléchargement…' });
 			return;
 		}
 		const failed = f.status === 'failed';
-		setIcon(el.icon, failed ? 'triangle-alert' : 'download');
-		if (failed && f.error) el.error = el.meta.createDiv({ cls: 'ms-file-error', text: f.error });
+		setIcon(el.icon, failed ? 'triangle-alert' : f.status === 'outdated' ? 'refresh-cw' : 'download');
+		if (failed && f.error) el.meta.createDiv({ cls: 'ms-file-error', text: f.error });
+		if (f.status === 'outdated') {
+			el.meta.createDiv({ cls: 'ms-file-note', text: 'Version plus récente sur Moodle' });
+			this.addOpenButton(el.badge, f);
+		}
 		const b = el.badge.createEl('button', {
-			cls: 'ms-ghost',
-			text: failed ? 'Réessayer' : f.status === 'outdated' ? 'Mettre à jour' : 'Télécharger',
+			cls: `ms-ghost ms-file-get${f.status === 'missing' ? ' is-accent' : ''}`,
 		});
+		setIcon(b.createSpan({ cls: 'ms-btn-icon' }), failed ? 'rotate-ccw' : f.status === 'outdated' ? 'refresh-cw' : 'download');
+		b.createSpan({ text: failed ? 'Réessayer' : f.status === 'outdated' ? 'Mettre à jour' : 'Télécharger' });
 		b.addEventListener('click', () => this.download([f]));
+	}
+
+	// Ouvre la copie locale avec l'application par défaut du système (lecteur PDF, Word…).
+	// localName : support renommé ou rangé ailleurs dans le module.
+	addOpenButton(parent, f) {
+		const dir = this.course.dest;
+		if (!dir) return;
+		const btn = parent.createEl('button', { cls: 'ms-ghost ms-file-open' });
+		const idle = () => {
+			btn.empty();
+			btn.removeClass('is-opening');
+			btn.disabled = false;
+			setIcon(btn.createSpan({ cls: 'ms-btn-icon' }), 'external-link');
+			btn.createSpan({ text: 'Ouvrir' });
+		};
+		idle();
+		btn.addEventListener('click', async (e) => {
+			e.stopPropagation();
+			if (btn.disabled) return;
+			// openPath rend la main dès que Windows a lancé l'application, bien avant que sa
+			// fenêtre apparaisse : l'animation reste au moins 1,5 s pour être vue.
+			btn.empty();
+			btn.addClass('is-opening');
+			btn.disabled = true;
+			btn.createDiv({ cls: 'ms-spinner' });
+			btn.createSpan({ text: 'Ouverture…' });
+			const [err] = await Promise.all([
+				require('electron').shell.openPath(path.join(dir, f.localName || f.name)),
+				new Promise((r) => window.setTimeout(r, 1500)),
+			]);
+			idle();
+			if (err) new Notice(`Moodle Sync : impossible d'ouvrir le fichier (${err}).`);
+		});
 	}
 
 	refreshFooter() {
 		if (!this.allBtn || !this.shown) return;
+		const n = this.plugin.renameCandidates(this.shown).length;
+		if (!this.renameBtn.disabled) {
+			this.renameBtn.empty();
+			this.renameBtn.toggle(n > 0 && !!this.course.dest);
+			setIcon(this.renameBtn.createSpan({ cls: 'ms-btn-icon' }), 'text-cursor-input');
+			this.renameBtn.createSpan({ text: `Renommer les fichiers (${n})` });
+		}
 		const todo = this.engine.pending(this.shown);
 		const busy = this.engine.allFiles(this.shown).some((f) => f.status === 'busy');
 		this.allBtn.empty();
@@ -1105,6 +1225,34 @@ class MoodleSyncModal extends Modal {
 			setIcon(this.allBtn.createSpan({ cls: 'ms-btn-icon' }), 'download');
 			this.allBtn.createSpan({ text: `Tout télécharger (${todo.length})` });
 		}
+	}
+
+	// Fichiers déjà là sous leur nom Moodle brut : aperçu avant -> après, puis renommage par
+	// Obsidian (les liens des notes suivent).
+	async renameExisting() {
+		const co = this.course;
+		const btn = this.renameBtn;
+		btn.disabled = true;
+		btn.empty();
+		btn.createDiv({ cls: 'ms-spinner' });
+		btn.createSpan({ text: 'Lecture des titres…' });
+		let plan = [];
+		try {
+			plan = await this.plugin.renamePlan(co, this.shown);
+		} finally {
+			btn.disabled = false;
+			this.refreshFooter();
+		}
+		if (!plan.length) {
+			new Notice('Moodle Sync : les fichiers de ce module ont déjà un nom propre.');
+			return;
+		}
+		new RenameModal(this.app, plan, async (chosen) => {
+			const res = await this.plugin.applyRenames(co, chosen);
+			new Notice(res.failed
+				? `Moodle Sync : ${res.done} fichier(s) renommé(s), ${res.failed} échec(s).`
+				: `Moodle Sync : ${res.done} fichier(s) renommé(s).`);
+		}).open();
 	}
 
 	async download(files) {
@@ -1123,6 +1271,61 @@ class MoodleSyncModal extends Modal {
 		} catch (e) {
 			new Notice(`Moodle Sync : ${e.message}`);
 		}
+	}
+}
+
+// Aperçu du renommage : chaque ligne se décoche, rien ne bouge avant « Renommer ».
+class RenameModal extends Modal {
+	constructor(app, plan, onConfirm) {
+		super(app);
+		this.plan = plan;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen() {
+		this.modalEl.addClass('moodle-sync-modal', 'ms-rename-modal');
+		const root = this.contentEl.createDiv({ cls: 'ms-root' });
+		const head = root.createDiv({ cls: 'ms-head' });
+		head.createEl('h2', { cls: 'ms-title', text: 'Renommer les fichiers' });
+		head.createEl('p', {
+			cls: 'ms-hint',
+			text: 'Les liens vers ces fichiers dans tes notes sont mis à jour. Décoche ce que tu veux garder tel quel.',
+		});
+		const list = root.createDiv({ cls: 'ms-sections ms-rename-list' });
+		const keep = new Set(this.plan);
+		const go = root.createDiv({ cls: 'ms-footer' }).createEl('button', { cls: 'ms-primary' });
+		const paint = () => {
+			go.empty();
+			go.disabled = !keep.size;
+			setIcon(go.createSpan({ cls: 'ms-btn-icon' }), 'check');
+			go.createSpan({ text: `Renommer (${keep.size})` });
+		};
+		for (const item of this.plan) {
+			const row = list.createEl('label', { cls: 'ms-rename-row' });
+			const box = row.createEl('input', { type: 'checkbox' });
+			box.checked = true;
+			box.addEventListener('change', () => {
+				if (box.checked) keep.add(item); else keep.delete(item);
+				row.toggleClass('is-off', !box.checked);
+				paint();
+			});
+			const names = row.createDiv({ cls: 'ms-rename-names' });
+			names.createDiv({ cls: 'ms-rename-to', text: path.basename(item.to) });
+			names.createDiv({ cls: 'ms-rename-from', text: path.basename(item.from) });
+		}
+		paint();
+		go.addEventListener('click', async () => {
+			go.disabled = true;
+			go.empty();
+			go.createDiv({ cls: 'ms-spinner' });
+			go.createSpan({ text: 'Renommage…' });
+			await this.onConfirm(this.plan.filter((x) => keep.has(x)));
+			this.close();
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
 	}
 }
 
@@ -1195,6 +1398,37 @@ class MoodleSyncSettingTab extends PluginSettingTab {
 			.addButton((b) => b
 				.setButtonText('Ouvrir')
 				.onClick(() => this.plugin.openModal()));
+
+		new Setting(containerEl).setName('Devoirs masqués').setHeading();
+		const masked = this.plugin.listMaskedDeposits();
+		if (!masked.length) {
+			new Setting(containerEl)
+				.setDesc('Aucun devoir masqué. Un devoir se masque depuis la fenêtre Moodle Sync (icône œil) ; il ne se réaffiche que depuis ici.');
+		} else {
+			for (const m of masked) {
+				new Setting(containerEl)
+					.setName(m.name || 'Devoir non résolu')
+					.setDesc(m.course
+						? `${m.course.code || '—'} · ${m.course.name.replace(/^\S+\s*-\s*/, '')}`
+						: 'Ouvre la fenêtre Moodle Sync une fois pour résoudre son nom.')
+					.addButton((b) => b
+						.setButtonText('Réafficher')
+						.onClick(() => {
+							this.plugin.setDepositHidden(m.id, false);
+							this.display();
+						}));
+			}
+			if (masked.length > 1) {
+				new Setting(containerEl)
+					.addButton((b) => b
+						.setButtonText('Tout réafficher')
+						.setWarning()
+						.onClick(() => {
+							for (const m of masked) this.plugin.setDepositHidden(m.id, false);
+							this.display();
+						}));
+			}
+		}
 	}
 }
 
@@ -1258,11 +1492,39 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		return new Set(this.app.loadLocalStorage(IGNORED_KEY) || []);
 	}
 
+	favoriteCourses() {
+		return new Set(this.app.loadLocalStorage(FAVORITES_KEY) || []);
+	}
+
+	setFavorite(id, on) {
+		const set = this.favoriteCourses();
+		if (on) set.add(id); else set.delete(id);
+		this.app.saveLocalStorage(FAVORITES_KEY, [...set]);
+	}
+
 	// Masquer un devoir d'un autre groupe (ou le réafficher après une erreur).
 	setDepositHidden(id, hidden) {
 		const set = this.ignoredDeposits();
 		if (hidden) set.add(id); else set.delete(id);
 		this.app.saveLocalStorage(IGNORED_KEY, [...set]);
+	}
+
+	// Devoirs masqués avec leur nom, résolu à partir des modules déjà analysés (scans).
+	// Un id sans scan récent (fenêtre jamais ouverte) reste listé, sans nom résolu.
+	listMaskedDeposits() {
+		const ignored = this.ignoredDeposits();
+		if (!ignored.size) return [];
+		const out = [];
+		for (const co of this.courses || []) {
+			const entry = this.scans.get(co.id);
+			if (!entry || !entry.result) continue;
+			for (const sec of entry.result.sections) for (const a of sec.activities) {
+				if (a.deposit && ignored.has(a.id)) out.push({ id: a.id, name: a.name, course: co });
+			}
+		}
+		const resolved = new Set(out.map((o) => o.id));
+		for (const id of ignored) if (!resolved.has(id)) out.push({ id, name: null, course: null });
+		return out;
 	}
 
 	loadToken() {
@@ -1351,10 +1613,74 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		for (const fn of this.listeners) fn(id);
 	}
 
+	// Supports présents sous leur nom Moodle exact : ni renommés à la main, ni trop petits pour
+	// être reconnus après renommage (cf. engine.findRenamed).
+	renameCandidates(scan) {
+		return this.engine.allFiles(scan).filter((f) => f.status === 'present' && !f.localName && f.size >= 1024);
+	}
+
+	// [{ file, from, to }] en chemins du vault, sans collision ni doublon de destination.
+	async renamePlan(course, scan) {
+		if (!course.dest) return [];
+		const base = this.app.vault.adapter.basePath;
+		const rel = (abs) => path.relative(base, abs).split(path.sep).join('/');
+		const taken = new Set();
+		const plan = [];
+		for (const f of this.renameCandidates(scan)) {
+			const abs = path.join(course.dest, f.name);
+			const name = await this.cleanName(abs, f, course);
+			if (!name || name === f.name) continue;
+			const target = path.join(course.dest, name);
+			const key = target.toLowerCase();
+			if (taken.has(key) || fs.existsSync(target)) continue;
+			taken.add(key);
+			plan.push({ file: f, from: rel(abs), to: rel(target) });
+		}
+		return plan;
+	}
+
+	async applyRenames(course, plan) {
+		let done = 0;
+		let failed = 0;
+		for (const item of plan) {
+			const tf = this.app.vault.getAbstractFileByPath(item.from);
+			try {
+				if (!tf) throw new Error('fichier introuvable dans le vault');
+				await this.app.fileManager.renameFile(tf, item.to);
+				done++;
+			} catch (e) {
+				failed++;
+				console.warn('Moodle Sync : renommage impossible', item.from, e);
+			}
+		}
+		const st = this.scans.get(course.id);
+		if (st && st.result) this.engine.applyStatus(st.result, course.dest);
+		this.notify(course.id);
+		return { done, failed };
+	}
+
+	// Nom propre d'un support téléchargé : titre de la 1re page d'un PDF s'il est fiable
+	// (cf. engine.pickTitle), sinon nom Moodle nettoyé.
+	async cleanName(tmp, file, course) {
+		let title = null;
+		if (/\.pdf$/i.test(file.name)) {
+			try {
+				title = this.engine.pickTitle(await pdfTitleLines(tmp), course);
+			} catch (e) {
+				console.warn('Moodle Sync : titre PDF illisible', file.name, e);
+			}
+		}
+		return this.engine.prettyName(file.name, title);
+	}
+
 	// jobs : [{ course, file, dir }]. Statuts tenus à jour, fenêtres prévenues à chaque fichier.
 	download(jobs, onDone) {
 		const unique = this.engine.uniqueJobs(jobs);
 		const courses = new Map(jobs.map((j) => [j.course.id, j.course]));
+		// Nom propre seulement pour un nouveau fichier : une mise à jour garde le nom existant.
+		for (const j of unique) {
+			if (j.file.status === 'missing') j.rename = (tmp, file) => this.cleanName(tmp, file, j.course);
+		}
 		for (const j of unique) j.file.status = 'busy';
 		courses.forEach((co, id) => this.notify(id));
 		return this.withClient((client) => this.engine.downloadFiles(client, unique, (job, err) => {
