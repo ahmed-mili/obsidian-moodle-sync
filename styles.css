@@ -901,6 +901,8 @@
 }
 
 .moodle-sync-modal .ms-deadlines {
+	/* Les lignes se réorganisent selon la largeur réelle du bandeau, pas celle de la fenêtre. */
+	container-type: inline-size;
 	margin: 0 0 12px;
 	padding: 10px 12px;
 	border: 1px solid color-mix(in srgb, var(--ms-orange) 40%, var(--ms-border));
@@ -938,6 +940,8 @@
 
 .moodle-sync-modal .ms-dl-fresh,
 .moodle-sync-modal .ms-dl-new {
+	display: inline-block;
+	white-space: nowrap;
 	padding: 1px 7px;
 	border-radius: 999px;
 	background: color-mix(in srgb, var(--ms-accent) 18%, transparent);
@@ -957,25 +961,46 @@
 	gap: 1px;
 }
 
-/* Environ quatre lignes visibles par défaut ; poignée en bas pour agrandir à la souris. */
+/* Hauteur proportionnelle à la fenêtre (environ quatre lignes au minimum) ; poignée en bas pour agrandir à la souris. */
 .moodle-sync-modal .ms-dl-list.is-scroll {
-	max-height: 172px;
+	max-height: clamp(132px, 40vh, 480px);
 	min-height: 0;
 	overflow: auto;
 	overscroll-behavior: contain;
 	resize: vertical;
 }
 
+/* Large : une ligne (code, matière, devoir, dépôt, délai, œil). Étroit : le devoir passe sur
+   toute la largeur, le dépôt et le délai sur la ligne suivante. Ordre du DOM = ordre large. */
 .moodle-sync-modal .ms-dl-item {
-	display: flex;
+	display: grid;
+	grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1.5fr) auto auto auto;
+	grid-template-areas: "code module name send when hide";
 	align-items: center;
-	gap: 12px;
+	gap: 4px 12px;
 	padding: 3px 6px;
 	border-radius: var(--radius-s);
 	font-size: 0.85em;
 	line-height: 1.35;
 	cursor: pointer;
 }
+
+@container (max-width: 560px) {
+	.moodle-sync-modal .ms-dl-item {
+		grid-template-columns: 64px minmax(0, 1fr) auto;
+		grid-template-areas:
+			"code module hide"
+			"name name name"
+			"send when when";
+	}
+}
+
+.moodle-sync-modal .ms-dl-code { grid-area: code; }
+.moodle-sync-modal .ms-dl-module { grid-area: module; }
+.moodle-sync-modal .ms-dl-name { grid-area: name; }
+.moodle-sync-modal .ms-dl-send { grid-area: send; justify-self: start; }
+.moodle-sync-modal .ms-dl-when { grid-area: when; justify-self: end; }
+.moodle-sync-modal .ms-dl-hide { grid-area: hide; justify-self: end; }
 
 .moodle-sync-modal .ms-dl-item:hover {
 	background: var(--ms-hover);
