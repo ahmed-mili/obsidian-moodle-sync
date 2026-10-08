@@ -127,30 +127,6 @@
 	overflow-wrap: anywhere;
 }
 
-/* ---------- saisie de l'URL ---------- */
-
-.moodle-sync-modal .ms-urlrow {
-	display: flex;
-	gap: 8px;
-}
-
-.moodle-sync-modal .ms-input {
-	flex: 1;
-	min-width: 0;
-	padding: 9px 12px;
-	border: 1px solid var(--ms-border);
-	border-radius: var(--radius-m);
-	background: var(--ms-field);
-	color: var(--ms-text);
-	font-family: var(--font-monospace);
-	font-size: 0.82em;
-}
-
-.moodle-sync-modal .ms-input:focus {
-	outline: none;
-	border-color: color-mix(in srgb, var(--ms-accent) 55%, var(--ms-border));
-}
-
 .moodle-sync-modal .ms-status {
 	display: flex;
 	align-items: center;
@@ -836,27 +812,6 @@
 	gap: 8px;
 }
 
-.moodle-sync-modal .ms-foot-tools {
-	display: flex;
-	gap: 14px;
-}
-
-/* !important : .theme-dark button (0,1,1) repeindrait ces liens en boutons pleins. */
-.moodle-sync-modal .ms-link {
-	padding: 0;
-	border: none;
-	background: transparent !important;
-	box-shadow: none !important;
-	color: var(--ms-muted) !important;
-	font-size: 0.78em;
-	cursor: pointer;
-}
-
-.moodle-sync-modal .ms-link:hover {
-	color: var(--ms-accent) !important;
-	text-decoration: underline;
-}
-
 /* Recherche sur tout Moodle : proposée seulement quand la frappe est explicite. */
 .moodle-sync-modal .ms-searchall {
 	width: 100%;
@@ -1004,9 +959,8 @@
 
 /* Environ quatre lignes visibles par défaut ; poignée en bas pour agrandir à la souris. */
 .moodle-sync-modal .ms-dl-list.is-scroll {
-	height: 172px;
-	min-height: 64px;
-	max-height: 70vh;
+	max-height: 172px;
+	min-height: 0;
 	overflow: auto;
 	overscroll-behavior: contain;
 	resize: vertical;
@@ -1164,13 +1118,6 @@
 
 /* ---------- pied de liste : outils + « Tout synchroniser » ---------- */
 
-.moodle-sync-modal .ms-foot-right {
-	display: flex;
-	align-items: center;
-	flex-wrap: wrap;
-	gap: 14px;
-}
-
 .moodle-sync-modal .ms-sync-all {
 	padding: 6px 14px;
 	font-size: 0.85em;
@@ -1268,4 +1215,114 @@
 .moodle-sync-modal .ms-file-open .ms-spinner {
 	width: 12px;
 	height: 12px;
+}
+
+/* ---------- en-tête de la liste : titre à gauche, actualiser à droite ---------- */
+
+.moodle-sync-modal .ms-head.is-split {
+	flex-direction: row;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding-right: 40px;   /* laisse la croix de fermeture native */
+}
+
+.moodle-sync-modal .ms-head-text {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+}
+
+/* !important : .theme-dark button (0,1,1) repeint fond, ombre et couleur. */
+.moodle-sync-modal .ms-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 30px;
+	height: 30px;
+	padding: 0;
+	border: 1px solid var(--ms-border);
+	border-radius: var(--radius-m);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-muted) !important;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-icon-btn:hover {
+	background: var(--ms-hover) !important;
+	color: var(--ms-text) !important;
+}
+
+.moodle-sync-modal .ms-icon-btn .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.moodle-sync-modal .ms-icon-btn.is-spinning .svg-icon {
+	animation: ms-spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.moodle-sync-modal .ms-icon-btn.is-spinning .svg-icon { animation-duration: 2.4s; }
+}
+
+/* Pied de liste : état à gauche, action principale à droite. Pied de module : renommer à gauche. */
+.moodle-sync-modal .ms-footer-split {
+	flex-wrap: nowrap;
+}
+
+.moodle-sync-modal .ms-footer .ms-rename {
+	margin-right: auto;
+}
+
+/* Liens discrets (fenêtre de connexion). */
+.moodle-sync-modal .ms-foot-tools {
+	display: flex;
+	gap: 14px;
+}
+
+/* !important : .theme-dark button (0,1,1) repeindrait ces liens en boutons pleins. */
+.moodle-sync-modal .ms-link {
+	padding: 0;
+	border: none;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-muted) !important;
+	font-size: 0.78em;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-link:hover {
+	color: var(--ms-accent) !important;
+	text-decoration: underline;
+}
+
+/* Ouvrir le dossier du module : poussé à droite de la barre de destination. */
+.moodle-sync-modal .ms-dest-open {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+	margin-left: auto;
+	padding: 3px 9px;
+	border: 1px solid var(--ms-border);
+	border-radius: calc(var(--radius-m) - 2px);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--ms-muted) !important;
+	font-size: 0.95em;
+	cursor: pointer;
+}
+
+.moodle-sync-modal .ms-dest-open:hover {
+	background: var(--ms-hover) !important;
+	color: var(--ms-text) !important;
+}
+
+.moodle-sync-modal .ms-dest-open .svg-icon {
+	width: 14px;
+	height: 14px;
 }

@@ -13,6 +13,7 @@ async function installedPlugin() {
 		registerObsidianProtocolHandler() {}
 		addRibbonIcon() {}
 		addSettingTab(tab) { this.settings = tab; }
+		register() {}
 	}
 	class PluginSettingTab {
 		constructor(app) {
@@ -22,6 +23,14 @@ async function installedPlugin() {
 	}
 	class Setting {
 		constructor(container) { this.buttons = []; container.rows.push(this); }
+		addToggle(callback) {
+			const toggle = {
+				setValue(value) { this.value = value; return this; },
+				onChange(change) { this.change = change; return this; },
+			};
+			callback(toggle);
+			return this;
+		}
 		setName(name) { this.name = name; return this; }
 		setDesc(desc) { this.desc = desc; return this; }
 		setHeading() { return this; }
@@ -50,6 +59,8 @@ async function installedPlugin() {
 	const storage = new Map();
 	plugin.app = {
 		vault: { adapter: { basePath: __dirname }, configDir: '.obsidian' },
+		// Pas de synchro de fond dans les tests : le tour réel demanderait Moodle.
+		workspace: { onLayoutReady() {} },
 		loadLocalStorage: (key) => storage.get(key),
 		saveLocalStorage: (key, value) => storage.set(key, value),
 	};

@@ -114,7 +114,7 @@ test('flattenContents : fichiers, dossiers, pages, liens, devoirs et état du d�
 	assert.equal(s1[24], undefined);
 	assert.deepEqual(tree[0].activities[0].files[0], {
 		url: 'https://m/webservice/pluginfile.php/1/mod_resource/content/1/Intro.pdf?forcedownload=1',
-		name: 'Intro.pdf', size: 5, timemodified: 100, status: 'missing',
+		name: 'Intro.pdf', size: 5, timemodified: 100, status: 'missing', section: 'Généralités',
 	});
 });
 
@@ -552,4 +552,90 @@ test('downloadFiles : renommage proposé, jamais par-dessus un autre fichier', a
 		c.close();
 		stop(s);
 	}
+});
+
+// ------------------------------------------------------- rangement par section
+
+test('sectionDir, fileDir : nom sûr pour le disque, racine du module sans option', () => {
+	assert.equal(E.sectionDir('Séance 1'), 'Séance 1');
+	assert.equal(E.sectionDir('Partie 2 : TP/TD. '), 'Partie 2 - TP-TD');
+	assert.equal(E.sectionDir('  '), 'Sans titre');
+	const f = { name: 'a.pdf', section: 'Séance 1' };
+	assert.equal(E.fileDir('/m', f, true), path.join('/m', 'Séance 1'));
+	assert.equal(E.fileDir('/m', f, false), '/m');
+	assert.equal(E.fileDir('/m', { name: 'a.pdf' }, true), '/m');
+});
+
+test('flattenContents : chaque fichier porte le nom de sa section', () => {
+	const tree = E.flattenContents(SECTIONS, ASSIGNS, DEPOSITS);
+	for (const s of tree) for (const f of E.allFiles({ sections: [s] })) assert.equal(f.section, s.name);
+});
+
+test('dedupe par section : même nom dans deux sections = deux fichiers', () => {
+	const mk = () => [
+		{ name: 'Séance 1', activities: [{ files: [{ name: 'CM.pdf', timemodified: 1, section: 'Séance 1' }] }] },
+		{ name: 'Séance 2', activities: [{ files: [{ name: 'CM.pdf', timemodified: 2, section: 'Séance 2' }] }] },
+	];
+	assert.equal(E.allFiles({ sections: E.dedupe(mk(), true) }).length, 2);
+	assert.equal(E.allFiles({ sections: E.dedupe(mk(), false) }).length, 1);
+});
+
+test('localStatus par section : dossier de section, sinon ancien emplacement à la racine', () => {
+	const dir = tmpdir();
+	const f = { name: 'CM.pdf', timemodified: 1000, section: 'Séance 1' };
+	assert.equal(E.localStatus(f, dir, true), 'missing');
+	fs.writeFileSync(path.join(dir, 'CM.pdf'), 'x');
+	fs.utimesSync(path.join(dir, 'CM.pdf'), 1000, 1000);
+	assert.equal(E.localStatus(f, dir, true), 'present');          // ancien emplacement reconnu
+	assert.equal(E.localStatus(f, dir, false), 'present');
+	fs.mkdirSync(path.join(dir, 'Séance 1'));
+	assert.equal(E.localStatus({ ...f, section: 'Séance 2' }, dir, true), 'present');
+	fs.writeFileSync(path.join(dir, 'Séance 1', 'CM.pdf'), 'x');
+	fs.utimesSync(path.join(dir, 'Séance 1', 'CM.pdf'), 1000, 1000);
+	fs.rmSync(path.join(dir, 'CM.pdf'));
+	assert.equal(E.localStatus(f, dir, true), 'present');
+	assert.equal(E.localStatus(f, dir, false), 'missing');
+});
+
+test('applyStatus par section : localName seulement hors du dossier prévu', () => {
+	const dir = tmpdir();
+	fs.mkdirSync(path.join(dir, 'Séance 1'));
+	fs.writeFileSync(path.join(dir, 'Séance 1', 'Bien rangé.pdf'), 'x');
+	fs.writeFileSync(path.join(dir, 'A la racine.pdf'), 'x');
+	fs.writeFileSync(path.join(dir, 'Renommé à la racine.pdf'), Buffer.alloc(4096));
+	const file = (name, size) => ({ name, size, timemodified: 0, status: 'missing', section: 'Séance 1' });
+	const scan = { bySection: true, sections: [{ activities: [{ files: [
+		file('Bien rangé.pdf', 1), file('A la racine.pdf', 1), file('Brut.pdf', 4096),
+	] }] }] };
+	E.applyStatus(scan, dir);
+	assert.deepEqual(E.allFiles(scan).map((x) => [x.status, x.localName || null]), [
+		['present', null],
+		['present', 'A la racine.pdf'],
+		['present', 'Renommé à la racine.pdf'],
+	]);
+});
+
+test('uniqueJobs : le dossier de section fait partie de la clé', () => {
+	const jobs = [
+		{ dir: path.join('/m', 'Séance 1'), file: { name: 'CM.pdf', timemodified: 1 }, tag: 1 },
+		{ dir: path.join('/m', 'Séance 2'), file: { name: 'CM.pdf', timemodified: 1 }, tag: 2 },
+	];
+	assert.equal(E.uniqueJobs(jobs).length, 2);
+});
+
+test('sections sans titre : nom des sœurs + titre de leur activité unique', () => {
+	const sec = (name, ...acts) => ({ name, activities: acts.map((n) => ({ name: n, files: [{ name: n + '.pdf' }] })) });
+	const tree = E.nameGenericSections([sec('Généralités', 'Syllabus'), sec('Séance 1', 'CM', 'TP'), sec('Séance 2', 'CM'), sec('Section 4', 'Projet'), sec('Section 5', 'A', 'B')]);
+	assert.deepEqual(tree.map((s) => s.name), ['Généralités', 'Séance 1', 'Séance 2', 'Séance 4 - Projet', 'Séance 5']);
+	assert.equal(tree[3].activities[0].files[0].section, 'Séance 4 - Projet');
+	// Aucune sœur nommée : on garde le nom de Moodle.
+	assert.deepEqual(E.nameGenericSections([sec('Section 1', 'A', 'B')]).map((s) => s.name), ['Section 1']);
+});
+
+test('seanceNumber : numéro de séance cité par le nom du devoir', () => {
+	assert.equal(E.seanceNumber('Rendu TPs CS2'), 2);
+	assert.equal(E.seanceNumber('Rendu TPs CS1_MEZUI_Menerique'), 1);
+	assert.equal(E.seanceNumber('Séance 3 - TP'), 3);
+	assert.equal(E.seanceNumber('TP_MEZUI_Menerique'), null);
+	assert.equal(E.seanceNumber('Projet'), null);
 });

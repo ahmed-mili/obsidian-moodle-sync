@@ -222,12 +222,38 @@ function formatRemaining(ms) {
 	return `${Math.floor(h / 24)} j ${h % 24} h`;
 }
 
+// Section sans vrai titre (« Section 4 », « Topic 4 »…) : Moodle ne donne que son numéro. Elle prend
+// le nom de ses sœurs (« Séance 1 », « Séance 2 » -> « Séance 4 »), complété par le titre de son
+// activité quand elle n'en contient qu'une (« Séance 4 - Projet »). Sans sœur nommée, le nom
+// Moodle reste tel quel.
+const GENERIC_SECTION = /^(?:section|topic|th[eè]me|semaine|week)\s*(\d+)$/i;
+
+function nameGenericSections(sections) {
+	const count = new Map();
+	for (const s of sections) {
+		const m = !GENERIC_SECTION.test(s.name) && s.name.match(/^(.+?)\s+\d+(?:\s.*)?$/);
+		if (m) count.set(m[1], (count.get(m[1]) || 0) + 1);
+	}
+	const best = [...count.entries()].sort((x, y) => y[1] - x[1])[0];
+	for (const s of sections) {
+		const g = s.name.match(GENERIC_SECTION);
+		if (!g) continue;
+		let name = best ? `${best[0]} ${g[1]}` : s.name;
+		const title = s.activities.length === 1 ? s.activities[0].name.trim() : '';
+		if (title && title.length <= 60) name += ` - ${title}`;
+		s.name = name;
+		for (const a of s.activities) for (const f of a.files) f.section = name;
+	}
+	return sections;
+}
+
 // Réponses de l'API -> sections -> activités -> fichiers, dans l'ordre de la page du cours.
 // assignments : mod_assign_get_assignments ; deposits : cmid -> parseSubmission().
 function flattenContents(sections, assignments = [], deposits = new Map()) {
 	const byCmid = new Map(assignments.map((a) => [a.cmid, a]));
 	const out = [];
 	for (const s of sections || []) {
+		const sectionName = decodeEntities(s.name).trim() || 'Sans titre';
 		const activities = [];
 		for (const m of s.modules || []) {
 			// Invisible pour l'utilisateur, ou simple étiquette de mise en page.
@@ -248,6 +274,7 @@ function flattenContents(sections, assignments = [], deposits = new Map()) {
 			// Le sujet joint au devoir se télécharge comme tout support de cours.
 			for (const f of (assign && assign.introattachments) || []) files.push(toFile(f));
 			files.sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+			for (const f of files) f.section = sectionName;
 			const act = { id: m.id, name: decodeEntities(m.name), type: m.modname, files, external };
 			// Devoir sans remise en ligne (nosubmissions) : rien à déposer, donc pas d'état.
 			if (assign && !assign.nosubmissions) {
@@ -263,35 +290,64 @@ function flattenContents(sections, assignments = [], deposits = new Map()) {
 			}
 			activities.push(act);
 		}
-		if (activities.length) out.push({ name: decodeEntities(s.name).trim() || 'Sans titre', activities });
+		if (activities.length) out.push({ name: sectionName, activities });
 	}
-	return out;
+	return nameGenericSections(out);
+}
+
+// Numéro de séance cité par le nom d'un devoir (« Rendu TPs CS2 », « Séance 2 - TP »), ou null.
+function seanceNumber(name) {
+	const m = String(name || '').match(/(?:\bCS|\bS[eé]ance|\bS)\s*(\d+)(?!\d)/i);
+	return m ? Number(m[1]) : null;
+}
+
+// Nom du sous-dossier d'une section Moodle : le nom de la section, sûr pour le disque.
+function sectionDir(name) {
+	return sanitize(name).replace(/[. ]+$/, '') || 'Sans titre';
+}
+
+// Dossier où un fichier doit vivre : celui de sa section si bySection, sinon le module lui-même.
+function fileDir(dest, file, bySection) {
+	return bySection && file.section ? path.join(dest, sectionDir(file.section)) : dest;
 }
 
 // Même nom final dans deux activités : un seul fichier sur le disque (casse ignorée, comme
-// NTFS), on garde le plus récent.
-function dedupe(sections) {
+// NTFS), on garde le plus récent. Rangés par section, deux sections peuvent porter le même nom.
+function dedupe(sections, bySection = false) {
 	const best = new Map();
+	const keyOf = (s, f) => (bySection ? `${sectionDir(s.name)}/` : '') + f.name.toLowerCase();
 	for (const s of sections) for (const a of s.activities) for (const f of a.files) {
-		const key = f.name.toLowerCase();
+		const key = keyOf(s, f);
 		const cur = best.get(key);
 		if (!cur || f.timemodified > cur.timemodified) best.set(key, f);
 	}
-	for (const s of sections) for (const a of s.activities) a.files = a.files.filter((f) => best.get(f.name.toLowerCase()) === f);
+	for (const s of sections) for (const a of s.activities) a.files = a.files.filter((f) => best.get(keyOf(s, f)) === f);
 	return sections;
 }
 
-function localStatus(file, dir) {
-	if (!dir) return 'missing';
-	let st;
-	try {
-		st = fs.statSync(path.join(dir, file.name));
-	} catch (e) {
-		return 'missing';
+// Où est le fichier sous son nom Moodle : dossier prévu d'abord, puis racine du module (ancien
+// rangement). { rel, stat, moved } ou null ; moved = trouvé ailleurs qu'au dossier prévu.
+function findLocal(file, dir, bySection = false) {
+	if (!dir) return null;
+	const wanted = path.relative(dir, path.join(fileDir(dir, file, bySection), file.name));
+	const candidates = bySection && wanted !== file.name ? [wanted, file.name] : [wanted];
+	for (const rel of candidates) {
+		try {
+			return { rel, stat: fs.statSync(path.join(dir, rel)), moved: rel !== wanted };
+		} catch (e) { /* suivant */ }
 	}
+	return null;
+}
+
+function statusOf(file, found) {
+	if (!found) return 'missing';
 	// Plus récent sur Moodle : le prof a remplacé le fichier. Une copie locale plus récente
 	// (PDF annoté) reste « présente » : on ne l'écrase pas.
-	return file.timemodified * 1000 > st.mtimeMs + MTIME_TOLERANCE ? 'outdated' : 'present';
+	return file.timemodified * 1000 > found.stat.mtimeMs + MTIME_TOLERANCE ? 'outdated' : 'present';
+}
+
+function localStatus(file, dir, bySection = false) {
+	return statusOf(file, findLocal(file, dir, bySection));
 }
 
 function allFiles(scan) {
@@ -337,13 +393,20 @@ function findRenamed(file, index) {
 }
 
 // Recalcule les statuts d'après le disque, sans toucher aux fichiers en cours ou en échec.
+// scan.bySection : rangement par section (réglage au moment de l'analyse).
+// localName (relatif au module) : support renommé, ou présent ailleurs qu'au dossier prévu.
 function applyStatus(scan, dir) {
 	let index = null;
 	for (const f of allFiles(scan)) {
 		if (f.status === 'busy' || f.status === 'failed') continue;
-		f.status = localStatus(f, dir);
+		const found = findLocal(f, dir, scan.bySection);
+		f.status = statusOf(f, found);
 		delete f.localName;
-		if (f.status !== 'missing' || !dir) continue;
+		if (found) {
+			if (found.moved) f.localName = found.rel;
+			continue;
+		}
+		if (!dir) continue;
 		index = index || sizeIndex(dir);
 		const renamed = findRenamed(f, index);
 		if (renamed) {
@@ -362,7 +425,7 @@ function pendingDeposits(scan, { now = Date.now(), seen = new Set(), ignored = n
 		if (!a.deposit || ignored.has(a.id)) continue;
 		const st = depositState(a.deposit, now);
 		if (st.state === 'submitted' || st.state === 'closed') continue;
-		out.push({ id: a.id, name: a.name, state: st.state, due: st.due, remaining: st.remaining, fresh: !seen.has(a.id) });
+		out.push({ id: a.id, name: a.name, section: s.name, state: st.state, due: st.due, remaining: st.remaining, fresh: !seen.has(a.id) });
 	}
 	return out.sort(compareDeposits);
 }
@@ -528,7 +591,7 @@ async function courseById(client, id, vaultRoot) {
 }
 
 // Analyse d'un cours : contenu et devoirs en parallèle, puis les rendus de chaque devoir.
-async function scanCourse(client, courseId, dir) {
+async function scanCourse(client, courseId, dir, { bySection = false } = {}) {
 	const [sections, assigns] = await Promise.all([
 		client.call('core_course_get_contents', { courseid: courseId }),
 		client.call('mod_assign_get_assignments', { 'courseids[0]': courseId }),
@@ -544,9 +607,9 @@ async function scanCourse(client, courseId, dir) {
 			if (e instanceof TokenError) throw e;
 		}
 	}));
-	const tree = dedupe(flattenContents(sections, assignments, deposits));
+	const tree = dedupe(flattenContents(sections, assignments, deposits), bySection);
 	const external = [...new Set(tree.flatMap((s) => s.activities.flatMap((a) => a.external)))];
-	return applyStatus({ sections: tree, external }, dir);
+	return applyStatus({ sections: tree, external, bySection }, dir);
 }
 
 function friendly(e) {
@@ -632,7 +695,7 @@ async function downloadFiles(client, jobs, onDone = () => {}) {
 
 module.exports = {
 	ROOT, MoodleError, TokenError,
-	sanitize, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
+	sanitize, sectionDir, fileDir, seanceNumber, nameGenericSections, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
 	parseSubmission, depositState, formatRemaining, pendingDeposits, compareDeposits,
 	localStatus, allFiles, applyStatus, pending, summarize, uniqueJobs,
 	launchUrl, verifyLaunchToken, limiter,

@@ -228,12 +228,38 @@ function formatRemaining(ms) {
 	return `${Math.floor(h / 24)} j ${h % 24} h`;
 }
 
+// Section sans vrai titre (« Section 4 », « Topic 4 »…) : Moodle ne donne que son numéro. Elle prend
+// le nom de ses sœurs (« Séance 1 », « Séance 2 » -> « Séance 4 »), complété par le titre de son
+// activité quand elle n'en contient qu'une (« Séance 4 - Projet »). Sans sœur nommée, le nom
+// Moodle reste tel quel.
+const GENERIC_SECTION = /^(?:section|topic|th[eè]me|semaine|week)\s*(\d+)$/i;
+
+function nameGenericSections(sections) {
+	const count = new Map();
+	for (const s of sections) {
+		const m = !GENERIC_SECTION.test(s.name) && s.name.match(/^(.+?)\s+\d+(?:\s.*)?$/);
+		if (m) count.set(m[1], (count.get(m[1]) || 0) + 1);
+	}
+	const best = [...count.entries()].sort((x, y) => y[1] - x[1])[0];
+	for (const s of sections) {
+		const g = s.name.match(GENERIC_SECTION);
+		if (!g) continue;
+		let name = best ? `${best[0]} ${g[1]}` : s.name;
+		const title = s.activities.length === 1 ? s.activities[0].name.trim() : '';
+		if (title && title.length <= 60) name += ` - ${title}`;
+		s.name = name;
+		for (const a of s.activities) for (const f of a.files) f.section = name;
+	}
+	return sections;
+}
+
 // Réponses de l'API -> sections -> activités -> fichiers, dans l'ordre de la page du cours.
 // assignments : mod_assign_get_assignments ; deposits : cmid -> parseSubmission().
 function flattenContents(sections, assignments = [], deposits = new Map()) {
 	const byCmid = new Map(assignments.map((a) => [a.cmid, a]));
 	const out = [];
 	for (const s of sections || []) {
+		const sectionName = decodeEntities(s.name).trim() || 'Sans titre';
 		const activities = [];
 		for (const m of s.modules || []) {
 			// Invisible pour l'utilisateur, ou simple étiquette de mise en page.
@@ -254,6 +280,7 @@ function flattenContents(sections, assignments = [], deposits = new Map()) {
 			// Le sujet joint au devoir se télécharge comme tout support de cours.
 			for (const f of (assign && assign.introattachments) || []) files.push(toFile(f));
 			files.sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+			for (const f of files) f.section = sectionName;
 			const act = { id: m.id, name: decodeEntities(m.name), type: m.modname, files, external };
 			// Devoir sans remise en ligne (nosubmissions) : rien à déposer, donc pas d'état.
 			if (assign && !assign.nosubmissions) {
@@ -269,35 +296,64 @@ function flattenContents(sections, assignments = [], deposits = new Map()) {
 			}
 			activities.push(act);
 		}
-		if (activities.length) out.push({ name: decodeEntities(s.name).trim() || 'Sans titre', activities });
+		if (activities.length) out.push({ name: sectionName, activities });
 	}
-	return out;
+	return nameGenericSections(out);
+}
+
+// Numéro de séance cité par le nom d'un devoir (« Rendu TPs CS2 », « Séance 2 - TP »), ou null.
+function seanceNumber(name) {
+	const m = String(name || '').match(/(?:\bCS|\bS[eé]ance|\bS)\s*(\d+)(?!\d)/i);
+	return m ? Number(m[1]) : null;
+}
+
+// Nom du sous-dossier d'une section Moodle : le nom de la section, sûr pour le disque.
+function sectionDir(name) {
+	return sanitize(name).replace(/[. ]+$/, '') || 'Sans titre';
+}
+
+// Dossier où un fichier doit vivre : celui de sa section si bySection, sinon le module lui-même.
+function fileDir(dest, file, bySection) {
+	return bySection && file.section ? path.join(dest, sectionDir(file.section)) : dest;
 }
 
 // Même nom final dans deux activités : un seul fichier sur le disque (casse ignorée, comme
-// NTFS), on garde le plus récent.
-function dedupe(sections) {
+// NTFS), on garde le plus récent. Rangés par section, deux sections peuvent porter le même nom.
+function dedupe(sections, bySection = false) {
 	const best = new Map();
+	const keyOf = (s, f) => (bySection ? `${sectionDir(s.name)}/` : '') + f.name.toLowerCase();
 	for (const s of sections) for (const a of s.activities) for (const f of a.files) {
-		const key = f.name.toLowerCase();
+		const key = keyOf(s, f);
 		const cur = best.get(key);
 		if (!cur || f.timemodified > cur.timemodified) best.set(key, f);
 	}
-	for (const s of sections) for (const a of s.activities) a.files = a.files.filter((f) => best.get(f.name.toLowerCase()) === f);
+	for (const s of sections) for (const a of s.activities) a.files = a.files.filter((f) => best.get(keyOf(s, f)) === f);
 	return sections;
 }
 
-function localStatus(file, dir) {
-	if (!dir) return 'missing';
-	let st;
-	try {
-		st = fs.statSync(path.join(dir, file.name));
-	} catch (e) {
-		return 'missing';
+// Où est le fichier sous son nom Moodle : dossier prévu d'abord, puis racine du module (ancien
+// rangement). { rel, stat, moved } ou null ; moved = trouvé ailleurs qu'au dossier prévu.
+function findLocal(file, dir, bySection = false) {
+	if (!dir) return null;
+	const wanted = path.relative(dir, path.join(fileDir(dir, file, bySection), file.name));
+	const candidates = bySection && wanted !== file.name ? [wanted, file.name] : [wanted];
+	for (const rel of candidates) {
+		try {
+			return { rel, stat: fs.statSync(path.join(dir, rel)), moved: rel !== wanted };
+		} catch (e) { /* suivant */ }
 	}
+	return null;
+}
+
+function statusOf(file, found) {
+	if (!found) return 'missing';
 	// Plus récent sur Moodle : le prof a remplacé le fichier. Une copie locale plus récente
 	// (PDF annoté) reste « présente » : on ne l'écrase pas.
-	return file.timemodified * 1000 > st.mtimeMs + MTIME_TOLERANCE ? 'outdated' : 'present';
+	return file.timemodified * 1000 > found.stat.mtimeMs + MTIME_TOLERANCE ? 'outdated' : 'present';
+}
+
+function localStatus(file, dir, bySection = false) {
+	return statusOf(file, findLocal(file, dir, bySection));
 }
 
 function allFiles(scan) {
@@ -343,13 +399,20 @@ function findRenamed(file, index) {
 }
 
 // Recalcule les statuts d'après le disque, sans toucher aux fichiers en cours ou en échec.
+// scan.bySection : rangement par section (réglage au moment de l'analyse).
+// localName (relatif au module) : support renommé, ou présent ailleurs qu'au dossier prévu.
 function applyStatus(scan, dir) {
 	let index = null;
 	for (const f of allFiles(scan)) {
 		if (f.status === 'busy' || f.status === 'failed') continue;
-		f.status = localStatus(f, dir);
+		const found = findLocal(f, dir, scan.bySection);
+		f.status = statusOf(f, found);
 		delete f.localName;
-		if (f.status !== 'missing' || !dir) continue;
+		if (found) {
+			if (found.moved) f.localName = found.rel;
+			continue;
+		}
+		if (!dir) continue;
 		index = index || sizeIndex(dir);
 		const renamed = findRenamed(f, index);
 		if (renamed) {
@@ -368,7 +431,7 @@ function pendingDeposits(scan, { now = Date.now(), seen = new Set(), ignored = n
 		if (!a.deposit || ignored.has(a.id)) continue;
 		const st = depositState(a.deposit, now);
 		if (st.state === 'submitted' || st.state === 'closed') continue;
-		out.push({ id: a.id, name: a.name, state: st.state, due: st.due, remaining: st.remaining, fresh: !seen.has(a.id) });
+		out.push({ id: a.id, name: a.name, section: s.name, state: st.state, due: st.due, remaining: st.remaining, fresh: !seen.has(a.id) });
 	}
 	return out.sort(compareDeposits);
 }
@@ -534,7 +597,7 @@ async function courseById(client, id, vaultRoot) {
 }
 
 // Analyse d'un cours : contenu et devoirs en parallèle, puis les rendus de chaque devoir.
-async function scanCourse(client, courseId, dir) {
+async function scanCourse(client, courseId, dir, { bySection = false } = {}) {
 	const [sections, assigns] = await Promise.all([
 		client.call('core_course_get_contents', { courseid: courseId }),
 		client.call('mod_assign_get_assignments', { 'courseids[0]': courseId }),
@@ -550,9 +613,9 @@ async function scanCourse(client, courseId, dir) {
 			if (e instanceof TokenError) throw e;
 		}
 	}));
-	const tree = dedupe(flattenContents(sections, assignments, deposits));
+	const tree = dedupe(flattenContents(sections, assignments, deposits), bySection);
 	const external = [...new Set(tree.flatMap((s) => s.activities.flatMap((a) => a.external)))];
-	return applyStatus({ sections: tree, external }, dir);
+	return applyStatus({ sections: tree, external, bySection }, dir);
 }
 
 function friendly(e) {
@@ -638,7 +701,7 @@ async function downloadFiles(client, jobs, onDone = () => {}) {
 
 module.exports = {
 	ROOT, MoodleError, TokenError,
-	sanitize, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
+	sanitize, sectionDir, fileDir, seanceNumber, nameGenericSections, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
 	parseSubmission, depositState, formatRemaining, pendingDeposits, compareDeposits,
 	localStatus, allFiles, applyStatus, pending, summarize, uniqueJobs,
 	launchUrl, verifyLaunchToken, limiter,
@@ -660,7 +723,12 @@ const COURSES_KEY = 'moodle-sync-courses';
 const SEEN_KEY = 'moodle-sync-seen-deposits';        // devoirs déjà vus : les autres sont « nouveaux »
 const IGNORED_KEY = 'moodle-sync-ignored-deposits';  // devoirs masqués du bandeau (autre groupe…)
 const FAVORITES_KEY = 'moodle-sync-favorite-courses'; // modules épinglés en tête de liste
+const BY_SECTION_KEY = 'moodle-sync-by-section';     // un sous-dossier par section Moodle (actif par défaut)
 const COURSE_URL = /^https:\/\/moodle\.myefrei\.fr\/course\/view\.php\?(?:[^#]*&)?id=(\d+)/;
+// Synchro de fond, tant qu'Obsidian tourne. Moodle ne publie pas de limite de débit : 60 s est la
+// cible demandée, et le recul après erreur (jusqu'à BG_MAX_BACKOFF) sert de marge.
+const BG_INTERVAL = 60 * 1000;
+const BG_MAX_BACKOFF = 15 * 60 * 1000;
 
 // Icône Lucide par type d'activité Moodle : la fenêtre doit se lire comme la page du cours.
 const TYPE_ICON = {
@@ -693,33 +761,30 @@ function courseIdOf(url) {
 	return m ? Number(m[1]) : null;
 }
 
-// Presse-papier Electron : synchrone et sans permission (navigator.clipboard exige le focus).
-// Il ne sert qu'à préremplir « Adresse manuelle », jamais à détourner l'ouverture.
-function clipboardCourseUrl() {
-	try {
-		const text = (require('electron').clipboard.readText() || '').trim();
-		return COURSE_URL.test(text) ? text : '';
-	} catch (e) {
-		return '';
-	}
-}
-
 // ---------------------------------------------------------------- connexion
 
 // Navigateur par défaut d'abord : vraie barre d'adresse, gestionnaire de mots de passe,
 // session Efrei déjà ouverte. Moodle renvoie alors vers obsidian://token=… ; la fenêtre
 // intégrée ne sert que de secours.
-// Dossier où déposer un rendu : le sous-dossier « Rendus… » du module s'il existe, sinon le
-// dossier du module lui-même. Sert à ouvrir l'explorateur pour un glisser-déposer sur Moodle.
-function depositFolder(course) {
+// Dossier où déposer un rendu : le sous-dossier « Rendus… » de la section du devoir s'il existe,
+// sinon celui du module, sinon le dossier du module lui-même. Sert à ouvrir l'explorateur pour
+// un glisser-déposer sur Moodle. sectionFolders : dossiers de section à essayer, par priorité.
+function depositFolder(course, sectionFolders = []) {
 	if (!course || !course.dest) return null;
-	try {
-		const sub = fs.readdirSync(course.dest, { withFileTypes: true })
-			.find((e) => e.isDirectory() && /rendus/i.test(e.name));
-		return sub ? path.join(course.dest, sub.name) : course.dest;
-	} catch (_) {
-		return course.dest;
+	const rendusIn = (dir) => {
+		try {
+			const sub = fs.readdirSync(dir, { withFileTypes: true })
+				.find((e) => e.isDirectory() && /rendus/i.test(e.name));
+			return sub ? path.join(dir, sub.name) : null;
+		} catch (_) {
+			return null;
+		}
+	};
+	for (const dir of sectionFolders) {
+		const found = dir && rendusIn(dir);
+		if (found) return found;
 	}
+	return rendusIn(course.dest) || course.dest;
 }
 
 // Lignes écrites dans la plus grosse police de la 1re page d'un PDF, dans l'ordre de lecture.
@@ -759,10 +824,23 @@ async function pdfTitleLines(file) {
 
 // Ouvre la page de dépôt Moodle et, en plus, l'explorateur sur le dossier des rendus du module,
 // pour glisser-déposer le fichier directement.
-function openDeposit(engine, course, assignId) {
+function openDeposit(engine, course, assignId, section = null, assignName = '') {
 	const { shell } = require('electron');
 	shell.openExternal(`${engine.ROOT}/mod/assign/view.php?id=${assignId}`);
-	const folder = depositFolder(course);
+	// Un devoir peut être rangé dans une autre section que sa séance (« Rendu TPs CS2 » est dans
+	// « Séance 1 ») : le numéro de séance du nom prime, puis la section du devoir.
+	const candidates = [];
+	const n = engine.seanceNumber(assignName);
+	if (n && course.dest) {
+		try {
+			const re = new RegExp(`(^|\\D)${n}(\\D|$)`);
+			const dir = fs.readdirSync(course.dest, { withFileTypes: true })
+				.find((e) => e.isDirectory() && !/rendus/i.test(e.name) && re.test(e.name));
+			if (dir) candidates.push(path.join(course.dest, dir.name));
+		} catch (_) { /* dossier illisible */ }
+	}
+	if (section && course.dest) candidates.push(path.join(course.dest, engine.sectionDir(section)));
+	const folder = depositFolder(course, candidates);
 	if (folder) shell.openPath(folder);
 }
 
@@ -919,8 +997,8 @@ class MoodleSyncModal extends Modal {
 		this.plugin = plugin;
 		this.engine = plugin.engine;
 		this.courseId = courseId;       // cours à ouvrir d'emblée (tuile avec url=)
-		this.view = null;               // 'connect' | 'picker' | 'course' | 'url' | 'loading'
-		this.extra = [];                // cours ajoutés par « Chercher sur tout Moodle » ou par adresse
+		this.view = null;               // 'connect' | 'picker' | 'course' | 'loading'
+		this.extra = [];                // cours ajoutés par « Chercher sur tout Moodle »
 		this.opened = new Set();        // modules déjà revérifiés depuis l'ouverture
 		this.yearFilter = undefined;
 		this.searchedAll = false;
@@ -1011,8 +1089,13 @@ class MoodleSyncModal extends Modal {
 		c.empty();
 
 		const head = this.renderHead(c, false);
-		head.createEl('h2', { text: 'Moodle Sync', cls: 'ms-title' });
-		head.createEl('p', { cls: 'ms-hint', text: "Les modules de l'année sont vérifiés à chaque ouverture." });
+		head.addClass('is-split');
+		const titles = head.createDiv({ cls: 'ms-head-text' });
+		titles.createEl('h2', { text: 'Moodle Sync', cls: 'ms-title' });
+		titles.createEl('p', { cls: 'ms-hint', text: "Les modules de l'année sont vérifiés à chaque ouverture." });
+		this.refreshBtn = head.createEl('button', { cls: 'ms-icon-btn', attr: { 'aria-label': 'Actualiser depuis Moodle' } });
+		setIcon(this.refreshBtn, 'refresh-cw');
+		this.refreshBtn.addEventListener('click', () => this.refresh(true));
 
 		this.deadlines = c.createDiv({ cls: 'ms-deadlines' });
 		this.deadlines.hide();
@@ -1039,11 +1122,7 @@ class MoodleSyncModal extends Modal {
 
 		const foot = c.createDiv({ cls: 'ms-footer ms-footer-split' });
 		this.status = foot.createDiv({ cls: 'ms-status' });
-		const right = foot.createDiv({ cls: 'ms-foot-right' });
-		const tools = right.createDiv({ cls: 'ms-foot-tools' });
-		tools.createEl('button', { cls: 'ms-link', text: 'Actualiser' }).addEventListener('click', () => this.refresh(true));
-		tools.createEl('button', { cls: 'ms-link', text: 'Adresse manuelle' }).addEventListener('click', () => this.renderUrlStep());
-		this.syncBtn = right.createEl('button', { cls: 'ms-primary ms-sync-all' });
+		this.syncBtn = foot.createEl('button', { cls: 'ms-primary ms-sync-all' });
 		this.syncBtn.addEventListener('click', () => this.syncAll());
 
 		this.search.addEventListener('input', () => {
@@ -1075,6 +1154,7 @@ class MoodleSyncModal extends Modal {
 	// rescan (bouton Actualiser) : revérifie aussi les modules déjà vérifiés.
 	async refresh(rescan) {
 		if (rescan) this.setStatus('Actualisation depuis Moodle…', true);
+		if (this.refreshBtn) this.refreshBtn.addClass('is-spinning');
 		try {
 			await this.plugin.refreshCourses();
 		} catch (e) {
@@ -1086,6 +1166,7 @@ class MoodleSyncModal extends Modal {
 			new Notice(`Moodle Sync : liste des cours non actualisée (${e.message}).`);
 		}
 		if (this.view !== 'picker') return;
+		if (this.refreshBtn) this.refreshBtn.removeClass('is-spinning');
 		this.afterCourses();
 		if (rescan) this.prescan(true);
 	}
@@ -1294,8 +1375,8 @@ class MoodleSyncModal extends Modal {
 		// Tous les devoirs dans une zone qui défile : pas de « Voir les autres » à cliquer.
 		const list = box.createDiv({ cls: 'ms-dl-list is-scroll' });
 		// La hauteur choisie à la poignée (resize vertical) survit aux repeints du bandeau.
-		if (this.dlHeight) list.style.height = this.dlHeight;
-		list.addEventListener('mouseup', () => { if (list.style.height) this.dlHeight = list.style.height; });
+		if (this.dlHeight) { list.style.height = this.dlHeight; list.style.maxHeight = '70vh'; }
+		list.addEventListener('mouseup', () => { if (list.style.height) { this.dlHeight = list.style.height; list.style.maxHeight = '70vh'; } });
 		for (const d of all) this.renderDeadline(list, d);
 		list.scrollTop = scrolled;
 	}
@@ -1319,7 +1400,7 @@ class MoodleSyncModal extends Modal {
 		});
 		send.addEventListener('click', (e) => {
 			e.stopPropagation();
-			openDeposit(this.engine, d.course, d.id);
+			openDeposit(this.engine, d.course, d.id, d.section, d.name);
 		});
 		row.createSpan({ cls: 'ms-dl-when', text: when });
 		const btn = row.createEl('button', {
@@ -1390,7 +1471,9 @@ class MoodleSyncModal extends Modal {
 		for (const co of this.allCourses()) {
 			const st = this.plugin.scans.get(co.id);
 			if (!co.dest || !st || !st.result) continue;
-			for (const file of this.engine.pending(st.result)) jobs.push({ course: co, file, dir: co.dest });
+			for (const file of this.engine.pending(st.result)) {
+				jobs.push({ course: co, file, dir: this.engine.fileDir(co.dest, file, st.result.bySection) });
+			}
 		}
 		return this.engine.uniqueJobs(jobs);
 	}
@@ -1489,48 +1572,6 @@ class MoodleSyncModal extends Modal {
 		this.refreshFooter();
 	}
 
-	// --- adresse manuelle -------------------------------------------------------
-
-	renderUrlStep() {
-		this.view = 'url';
-		const c = this.contentEl;
-		c.empty();
-		const head = this.renderHead(c, true);
-		head.createEl('h2', { text: 'Moodle Sync', cls: 'ms-title' });
-		head.createEl('p', {
-			cls: 'ms-hint',
-			text: "Colle l'adresse de la page du cours. Le dossier du module est déduit de son code.",
-		});
-		const row = c.createDiv({ cls: 'ms-urlrow' });
-		const input = row.createEl('input', {
-			type: 'text',
-			cls: 'ms-input',
-			attr: { placeholder: 'https://moodle.myefrei.fr/course/view.php?id=…', spellcheck: 'false' },
-		});
-		input.value = clipboardCourseUrl();
-		const btn = row.createEl('button', { cls: 'ms-primary', text: 'Ouvrir' });
-		this.status = c.createDiv({ cls: 'ms-status' });
-		this.status.hide();
-		const go = () => {
-			const id = courseIdOf(input.value);
-			if (!id) {
-				this.setStatus('Adresse invalide : il faut une page de cours Moodle (course/view.php?id=…).', false, true);
-				return;
-			}
-			this.openCourseById(id);
-		};
-		btn.addEventListener('click', go);
-		input.addEventListener('keydown', (e) => {
-			if (e.key !== 'Enter') return;
-			e.preventDefault();
-			go();
-		});
-		window.setTimeout(() => {
-			input.focus();
-			input.select();
-		}, 0);
-	}
-
 	// --- un module, comme sur Moodle ---------------------------------------------
 
 	async openCourseById(id) {
@@ -1580,9 +1621,20 @@ class MoodleSyncModal extends Modal {
 		setIcon(dest.createSpan({ cls: 'ms-dest-icon' }), 'folder-open');
 		dest.createSpan({
 			cls: 'ms-dest-path',
-			text: co.dest ? co.dest.replace(/^.*Ethical Hacking[\\/]/, '') : 'Aucun dossier trouvé pour ce module',
+			text: co.dest
+				? co.dest.replace(/^.*Ethical Hacking[\\/]/, '') + (this.plugin.bySection() ? ' (un dossier par section)' : '')
+				: 'Aucun dossier trouvé pour ce module',
 		});
 		if (!co.dest) dest.addClass('is-warn');
+		else {
+			const open = dest.createEl('button', { cls: 'ms-dest-open', attr: { 'aria-label': 'Ouvrir le dossier du module' } });
+			setIcon(open.createSpan({ cls: 'ms-btn-icon' }), 'folder-open');
+			open.createSpan({ text: 'Ouvrir le dossier' });
+			open.addEventListener('click', async () => {
+				const err = await require('electron').shell.openPath(co.dest);
+				if (err) new Notice(`Moodle Sync : impossible d'ouvrir le dossier (${err}).`);
+			});
+		}
 	}
 
 	renderCourse(scan) {
@@ -1734,7 +1786,7 @@ class MoodleSyncModal extends Modal {
 		});
 		const b = el.side.createEl('button', { cls: 'ms-ghost', text: 'Déposer sur Moodle' });
 		b.addEventListener('click', () => {
-			openDeposit(this.engine, this.course, act.id);
+			openDeposit(this.engine, this.course, act.id, (this.shown.sections.find((sec) => sec.activities.includes(act)) || {}).name, act.name);
 		});
 	}
 
@@ -1842,7 +1894,9 @@ class MoodleSyncModal extends Modal {
 			btn.createDiv({ cls: 'ms-spinner' });
 			btn.createSpan({ text: 'Ouverture…' });
 			const [err] = await Promise.all([
-				require('electron').shell.openPath(path.join(dir, f.localName || f.name)),
+				require('electron').shell.openPath(f.localName
+					? path.join(dir, f.localName)
+					: path.join(this.engine.fileDir(dir, f, this.shown && this.shown.bySection), f.name)),
 				new Promise((r) => window.setTimeout(r, 1500)),
 			]);
 			idle();
@@ -1852,12 +1906,12 @@ class MoodleSyncModal extends Modal {
 
 	refreshFooter() {
 		if (!this.allBtn || !this.shown) return;
-		const n = this.plugin.renameCandidates(this.shown).length;
+		const n = this.plugin.renameCandidates(this.shown, this.course).length;
 		if (!this.renameBtn.disabled) {
 			this.renameBtn.empty();
 			this.renameBtn.toggle(n > 0 && !!this.course.dest);
 			setIcon(this.renameBtn.createSpan({ cls: 'ms-btn-icon' }), 'text-cursor-input');
-			this.renameBtn.createSpan({ text: `Renommer les fichiers (${n})` });
+			this.renameBtn.createSpan({ text: `${this.plugin.bySection() ? 'Renommer et ranger' : 'Renommer'} les fichiers (${n})` });
 		}
 		const todo = this.engine.pending(this.shown);
 		const busy = this.engine.allFiles(this.shown).some((f) => f.status === 'busy');
@@ -1892,14 +1946,14 @@ class MoodleSyncModal extends Modal {
 			this.refreshFooter();
 		}
 		if (!plan.length) {
-			new Notice('Moodle Sync : les fichiers de ce module ont déjà un nom propre.');
+			new Notice('Moodle Sync : les fichiers de ce module ont déjà un nom propre et sont bien rangés.');
 			return;
 		}
 		new RenameModal(this.app, plan, async (chosen) => {
 			const res = await this.plugin.applyRenames(co, chosen);
 			new Notice(res.failed
-				? `Moodle Sync : ${res.done} fichier(s) renommé(s), ${res.failed} échec(s).`
-				: `Moodle Sync : ${res.done} fichier(s) renommé(s).`);
+				? `Moodle Sync : ${res.done} fichier(s) renommé(s) ou rangé(s), ${res.failed} échec(s).`
+				: `Moodle Sync : ${res.done} fichier(s) renommé(s) ou rangé(s).`);
 		}).open();
 	}
 
@@ -1911,7 +1965,8 @@ class MoodleSyncModal extends Modal {
 		}
 		if (!files.length) return;
 		try {
-			const res = await this.plugin.download(files.map((file) => ({ course: co, file, dir: co.dest })));
+			const by = this.shown && this.shown.bySection;
+			const res = await this.plugin.download(files.map((file) => ({ course: co, file, dir: this.engine.fileDir(co.dest, file, by) })));
 			const failed = res.filter((r) => !r.ok).length;
 			new Notice(failed
 				? `Moodle Sync : ${res.length - failed} téléchargé(s), ${failed} échec(s).`
@@ -1934,10 +1989,10 @@ class RenameModal extends Modal {
 		this.modalEl.addClass('moodle-sync-modal', 'ms-rename-modal');
 		const root = this.contentEl.createDiv({ cls: 'ms-root' });
 		const head = root.createDiv({ cls: 'ms-head' });
-		head.createEl('h2', { cls: 'ms-title', text: 'Renommer les fichiers' });
+		head.createEl('h2', { cls: 'ms-title', text: 'Renommer et ranger les fichiers' });
 		head.createEl('p', {
 			cls: 'ms-hint',
-			text: 'Les liens vers ces fichiers dans tes notes sont mis à jour. Décoche ce que tu veux garder tel quel.',
+			text: 'Les liens vers ces fichiers dans tes notes sont mis à jour. Un fichier peut aussi être déplacé dans le dossier de sa section. Décoche ce que tu veux garder tel quel.',
 		});
 		const list = root.createDiv({ cls: 'ms-sections ms-rename-list' });
 		const keep = new Set(this.plan);
@@ -1959,7 +2014,11 @@ class RenameModal extends Modal {
 			});
 			const names = row.createDiv({ cls: 'ms-rename-names' });
 			names.createDiv({ cls: 'ms-rename-to', text: path.basename(item.to) });
-			names.createDiv({ cls: 'ms-rename-from', text: path.basename(item.from) });
+			const moved = path.posix.dirname(item.from) !== path.posix.dirname(item.to);
+			names.createDiv({
+				cls: 'ms-rename-from',
+				text: path.basename(item.from) + (moved ? ` · vers ${path.posix.basename(path.posix.dirname(item.to))}` : ''),
+			});
 		}
 		paint();
 		go.addEventListener('click', async () => {
@@ -2047,6 +2106,16 @@ class MoodleSyncSettingTab extends PluginSettingTab {
 				.setButtonText('Ouvrir')
 				.onClick(() => this.plugin.openModal()));
 
+		new Setting(containerEl)
+			.setName('Ranger par section')
+			.setDesc('Un sous-dossier par section de la page Moodle (Généralités, Séance 1…) dans le dossier du module. Les fichiers déjà présents à la racine restent reconnus ; « Renommer et ranger » les déplace.')
+			.addToggle((tg) => tg
+				.setValue(this.plugin.bySection())
+				.onChange((v) => {
+					this.plugin.setBySection(v);
+					this.plugin.scans.clear();
+				}));
+
 		new Setting(containerEl).setName('Devoirs masqués').setHeading();
 		const masked = this.plugin.listMaskedDeposits();
 		if (!masked.length) {
@@ -2106,6 +2175,8 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		this.registerObsidianProtocolHandler('moodle-sync', (params) => this.openModal(params.url));
 		this.addRibbonIcon('cloud-download', 'Moodle Sync', () => this.openModal());
 		this.addSettingTab(new MoodleSyncSettingTab(this.app, this));
+		this.app.workspace.onLayoutReady(() => this.startBackground());
+		this.register(() => this.stopBackground());
 	}
 
 	onunload() {
@@ -2114,6 +2185,14 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 
 	openModal(url) {
 		new MoodleSyncModal(this, courseIdOf(url)).open();
+	}
+
+	bySection() {
+		return this.app.loadLocalStorage(BY_SECTION_KEY) !== false;
+	}
+
+	setBySection(value) {
+		this.app.saveLocalStorage(BY_SECTION_KEY, !!value);
 	}
 
 	// --- jeton ---------------------------------------------------------------
@@ -2216,6 +2295,75 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		}
 	}
 
+	// --- synchro de fond -----------------------------------------------------
+	// Un tour : liste des cours, analyse de chaque module, téléchargement des supports absents ou
+	// mis à jour. Jamais de fenêtre de connexion ici : sans jeton valide, le tour ne fait rien.
+
+	startBackground() {
+		this.bgFailures = 0;
+		this.scheduleBackground(10 * 1000);
+	}
+
+	scheduleBackground(delay) {
+		this.stopBackground();
+		this.bgTimer = window.setTimeout(() => this.backgroundTick(), delay);
+	}
+
+	stopBackground() {
+		if (this.bgTimer) window.clearTimeout(this.bgTimer);
+		this.bgTimer = null;
+	}
+
+	// Le délai court après la fin du tour : deux tours ne se chevauchent jamais.
+	async backgroundTick() {
+		this.bgTimer = null;
+		let delay = BG_INTERVAL;
+		const client = this.getClient();
+		if (client && !this.bgRunning) {
+			this.bgRunning = true;
+			try {
+				const n = await this.syncInBackground(client);
+				this.bgFailures = 0;
+				if (n) new Notice(`Moodle Sync : ${n} nouveau(x) fichier(s) téléchargé(s).`);
+			} catch (e) {
+				if (e instanceof this.engine.TokenError) {
+					// Jeton refusé : retiré comme dans withClient, sans ouvrir de connexion. Le prochain
+					// tour attendra un nouveau jeton, saisi à la prochaine ouverture du plugin.
+					if ((this.loadToken() || {}).token === client.token) this.saveToken(null);
+				} else {
+					this.bgFailures = (this.bgFailures || 0) + 1;
+					delay = Math.min(BG_INTERVAL * 2 ** this.bgFailures, BG_MAX_BACKOFF);
+					console.warn('Moodle Sync : synchro de fond en échec', e);
+				}
+			} finally {
+				this.bgRunning = false;
+			}
+		}
+		this.scheduleBackground(delay);
+	}
+
+	// Renvoie le nombre de fichiers téléchargés pendant ce tour.
+	async syncInBackground(client) {
+		const list = await this.engine.listCourses(client, this.loadToken().userid, this.vaultRoot);
+		this.courses = list;
+		this.app.saveLocalStorage(COURSES_KEY, list);
+		const jobs = [];
+		await Promise.all(list.filter((co) => co.dest).map(async (co) => {
+			const result = await this.engine.scanCourse(client, co.id, co.dest, { bySection: this.bySection() });
+			this.scans.set(co.id, { state: 'done', result, error: null, promise: null });
+			this.notify(co.id);
+			for (const file of this.engine.allFiles(result)) {
+				if (file.status === 'missing' || file.status === 'outdated') {
+					jobs.push({ course: co, file, dir: this.engine.fileDir(co.dest, file, result.bySection) });
+				}
+			}
+		}));
+		// Pas de téléchargement pendant qu'un téléchargement manuel tourne : le doublon serait écrit deux fois.
+		if (!jobs.length || this.busyDownloads) return 0;
+		const res = await this.download(jobs);
+		return res.filter((r) => r.ok).length;
+	}
+
 	// --- cours et analyses ---------------------------------------------------
 
 	refreshCourses() {
@@ -2236,7 +2384,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		const cur = this.scans.get(course.id);
 		if (cur && (cur.state === 'busy' || (cur.state === 'done' && !force))) return cur.promise;
 		const entry = { state: 'busy', result: cur ? cur.result : null, error: null, promise: null };
-		entry.promise = this.withClient((client) => this.engine.scanCourse(client, course.id, course.dest))
+		entry.promise = this.withClient((client) => this.engine.scanCourse(client, course.id, course.dest, { bySection: this.bySection() }))
 			.then((r) => {
 				entry.state = 'done';
 				entry.result = r;
@@ -2258,10 +2406,21 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		for (const fn of this.listeners) fn(id);
 	}
 
-	// Supports présents sous leur nom Moodle exact : ni renommés à la main, ni trop petits pour
-	// être reconnus après renommage (cf. engine.findRenamed).
-	renameCandidates(scan) {
-		return this.engine.allFiles(scan).filter((f) => f.status === 'present' && !f.localName && f.size >= 1024);
+	// Chemin actuel d'un fichier présent : localName (relatif au module) ou emplacement prévu.
+	currentPath(course, scan, f) {
+		return f.localName ? path.join(course.dest, f.localName) : path.join(this.engine.fileDir(course.dest, f, scan.bySection), f.name);
+	}
+
+	// Supports à renommer (encore sous leur nom Moodle brut, assez gros pour être reconnus après
+	// renommage, cf. engine.findRenamed) ou à ranger (hors du dossier de leur section).
+	renameCandidates(scan, course) {
+		return this.engine.allFiles(scan).filter((f) => {
+			if (f.status !== 'present') return false;
+			const raw = path.basename(f.localName || f.name) === f.name && f.size >= 1024;
+			const misplaced = scan.bySection && course && course.dest
+				&& path.dirname(this.currentPath(course, scan, f)) !== this.engine.fileDir(course.dest, f, true);
+			return raw || misplaced;
+		});
 	}
 
 	// [{ file, from, to }] en chemins du vault, sans collision ni doublon de destination.
@@ -2271,13 +2430,13 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		const rel = (abs) => path.relative(base, abs).split(path.sep).join('/');
 		const taken = new Set();
 		const plan = [];
-		for (const f of this.renameCandidates(scan)) {
-			const abs = path.join(course.dest, f.name);
-			const name = await this.cleanName(abs, f, course);
-			if (!name || name === f.name) continue;
-			const target = path.join(course.dest, name);
+		for (const f of this.renameCandidates(scan, course)) {
+			const abs = this.currentPath(course, scan, f);
+			const raw = path.basename(abs) === f.name && f.size >= 1024;
+			const name = (raw && await this.cleanName(abs, f, course)) || path.basename(abs);
+			const target = path.join(this.engine.fileDir(course.dest, f, scan.bySection), name);
 			const key = target.toLowerCase();
-			if (taken.has(key) || fs.existsSync(target)) continue;
+			if (key === abs.toLowerCase() || taken.has(key) || fs.existsSync(target)) continue;
 			taken.add(key);
 			plan.push({ file: f, from: rel(abs), to: rel(target) });
 		}
@@ -2291,6 +2450,8 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 			const tf = this.app.vault.getAbstractFileByPath(item.from);
 			try {
 				if (!tf) throw new Error('fichier introuvable dans le vault');
+				const folder = path.posix.dirname(item.to);
+				if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
 				await this.app.fileManager.renameFile(tf, item.to);
 				done++;
 			} catch (e) {
@@ -2328,6 +2489,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		}
 		for (const j of unique) j.file.status = 'busy';
 		courses.forEach((co, id) => this.notify(id));
+		this.busyDownloads = (this.busyDownloads || 0) + 1;
 		return this.withClient((client) => this.engine.downloadFiles(client, unique, (job, err) => {
 			job.file.status = err ? 'failed' : 'present';
 			job.file.error = err ? err.message : null;
@@ -2341,6 +2503,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 			}
 			throw e;
 		}).finally(() => {
+			this.busyDownloads--;
 			// Un doublon écarté (même nom, autre cohorte) redevient « présent » grâce au fichier écrit.
 			courses.forEach((co, id) => {
 				const st = this.scans.get(id);
