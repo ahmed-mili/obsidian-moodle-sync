@@ -13,6 +13,7 @@ const SEEN_KEY = 'moodle-sync-seen-deposits';        // devoirs déjà vus : les
 const IGNORED_KEY = 'moodle-sync-ignored-deposits';  // devoirs masqués du bandeau (autre groupe…)
 const FAVORITES_KEY = 'moodle-sync-favorite-courses'; // modules épinglés en tête de liste
 const BY_SECTION_KEY = 'moodle-sync-by-section';     // un sous-dossier par section Moodle (actif par défaut)
+const DEVICE_KEY = 'moodle-sync-device';             // nom du fichier de CET appareil dans .neo-quiz/moodle/ (mode lié)
 const COURSE_URL = /^https:\/\/moodle\.myefrei\.fr\/course\/view\.php\?(?:[^#]*&)?id=(\d+)/;
 // Synchro de fond, tant qu'Obsidian tourne. Moodle ne publie pas de limite de débit : 60 s est la
 // cible demandée, et le recul après erreur (jusqu'à BG_MAX_BACKOFF) sert de marge.
@@ -1348,6 +1349,12 @@ class MoodleSyncSettingTab extends PluginSettingTab {
 			}).catch(() => {});
 		}
 
+		if (this.plugin.lie) {
+			new Setting(containerEl)
+				.setName('Lié à Neo Quiz')
+				.setDesc("Ce vault est le dossier de Neo Quiz : les favoris et les devoirs masqués sont les mêmes que dans l'app, et c'est elle qui synchronise en arrière-plan. Les boutons du plugin restent utilisables à la main.");
+		}
+
 		new Setting(containerEl)
 			.setName('Compte Moodle')
 			.setDesc(t
@@ -1455,6 +1462,10 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		this.coursesPromise = null;
 		this.scans = new Map();       // id du cours -> { state, result, error, promise }
 		this.listeners = new Set();   // fenêtres ouvertes, prévenues à chaque changement
+		/* Mode lié : le vault est la racine de Neo Quiz (`.neo-quiz/`). Favoris et devoirs masqués
+		   sont alors ceux de Neo Quiz, et la synchro de fond est la sienne (pas de doublon de
+		   requêtes vers l'école). Ailleurs, le plugin reste autonome, comme avant. */
+		this.lie = this.engine.estLie(this.vaultRoot);
 		const cached = this.app.loadLocalStorage(COURSES_KEY);
 		this.courses = Array.isArray(cached) && cached.length ? this.engine.locate(cached, this.vaultRoot) : null;
 
@@ -1467,7 +1478,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		this.registerObsidianProtocolHandler('moodle-sync', (params) => this.openModal(params.url));
 		this.addRibbonIcon('cloud-download', 'Moodle Sync', () => this.openModal());
 		this.addSettingTab(new MoodleSyncSettingTab(this.app, this));
-		this.app.workspace.onLayoutReady(() => this.startBackground());
+		if (!this.lie) this.app.workspace.onLayoutReady(() => this.startBackground());
 		this.register(() => this.stopBackground());
 	}
 
@@ -1504,15 +1515,41 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		if (seen.size !== before || !this.hasSeenDeposits()) this.app.saveLocalStorage(SEEN_KEY, [...seen]);
 	}
 
+	// --- listes : locales, ou partagées avec Neo Quiz en mode lié -----------------
+
+	// Le nom du fichier de cet appareil dans `.neo-quiz/moodle/`, tiré une fois.
+	appareil() {
+		let id = this.app.loadLocalStorage(DEVICE_KEY);
+		if (typeof id !== 'string' || !/^obsidian-[0-9a-f-]{36}$/.test(id)) {
+			id = `obsidian-${crypto.randomUUID()}`;
+			this.app.saveLocalStorage(DEVICE_KEY, id);
+		}
+		return id;
+	}
+
+	listePartagee(cle) {
+		const { own, autres } = this.engine.lireListesPartagees(this.vaultRoot, this.appareil());
+		return new Set(this.engine.fusionner([own || {}, ...autres], cle));
+	}
+
+	poserPartage(cle, id, on) {
+		const appareil = this.appareil();
+		const { own, autres } = this.engine.lireListesPartagees(this.vaultRoot, appareil);
+		this.engine.ecrireListesPartagees(this.vaultRoot, appareil, this.engine.poser(own || {}, autres, cle, id, on, Date.now()));
+	}
+
 	ignoredDeposits() {
+		if (this.lie) return this.listePartagee('devoirsIgnores');
 		return new Set(this.app.loadLocalStorage(IGNORED_KEY) || []);
 	}
 
 	favoriteCourses() {
+		if (this.lie) return this.listePartagee('favoris');
 		return new Set(this.app.loadLocalStorage(FAVORITES_KEY) || []);
 	}
 
 	setFavorite(id, on) {
+		if (this.lie) { this.poserPartage('favoris', id, on); return; }
 		const set = this.favoriteCourses();
 		if (on) set.add(id); else set.delete(id);
 		this.app.saveLocalStorage(FAVORITES_KEY, [...set]);
@@ -1520,6 +1557,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 
 	// Masquer un devoir d'un autre groupe (ou le réafficher après une erreur).
 	setDepositHidden(id, hidden) {
+		if (this.lie) { this.poserPartage('devoirsIgnores', id, hidden); return; }
 		const set = this.ignoredDeposits();
 		if (hidden) set.add(id); else set.delete(id);
 		this.app.saveLocalStorage(IGNORED_KEY, [...set]);

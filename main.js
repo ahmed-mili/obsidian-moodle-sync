@@ -699,7 +699,98 @@ async function downloadFiles(client, jobs, onDone = () => {}) {
 	})));
 }
 
+// ------------------------------------------------------------------- mode lié à Neo Quiz
+// Un vault qui contient `.neo-quiz/` est la racine de l'app Neo Quiz : le plugin y partage ses
+// listes (favoris, devoirs masqués) avec elle, dans les mêmes fichiers et avec la même règle
+// (`apps/windows/electron/moodle/listes.ts` de Neo Quiz) : un fichier par appareil,
+// `.neo-quiz/moodle/<appareil>.json`, chaque geste daté, le plus récent l'emporte, un retrait
+// reste une pierre tombale. Hors d'un tel vault, rien de ceci ne sert : le plugin est autonome.
+
+const LISTES_PARTAGEES = ['favoris', 'exclus', 'extra', 'devoirsIgnores', 'devoirsVus'];
+const MAX_ENTREES = 1000;
+const MAX_FICHIER_LISTES = 256 * 1024;
+const MAX_FICHIERS_LISTES = 64;
+
+function estLie(vaultRoot) {
+	try { return fs.statSync(path.join(vaultRoot, '.neo-quiz')).isDirectory(); } catch { return false; }
+}
+
+// Un fichier d'appareil lu du dossier synchronisé : tout ce qui est mal formé est écarté. Un geste
+// daté après `maxAt` (horloge fausse, ou date forgée qui gagnerait toujours) aussi.
+function lireTable(brut, maxAt = Number.MAX_SAFE_INTEGER) {
+	const out = {};
+	const listes = brut && typeof brut === 'object' && !Array.isArray(brut) ? brut.lists : null;
+	if (!listes || typeof listes !== 'object' || Array.isArray(listes)) return out;
+	for (const cle of LISTES_PARTAGEES) {
+		const l = listes[cle];
+		if (!l || typeof l !== 'object' || Array.isArray(l)) continue;
+		const t = {};
+		let n = 0;
+		for (const [k, g] of Object.entries(l)) {
+			if (n >= MAX_ENTREES) break;
+			if (!/^[1-9][0-9]{0,15}$/.test(k) || !Number.isSafeInteger(Number(k)) || !g || typeof g !== 'object') continue;
+			if (typeof g.on !== 'boolean' || typeof g.at !== 'number' || !Number.isFinite(g.at) || g.at < 0 || g.at > maxAt) continue;
+			t[k] = { on: g.on, at: g.at };
+			n++;
+		}
+		out[cle] = t;
+	}
+	return out;
+}
+
+const gagne = (a, b) => (a.at !== b.at ? a.at > b.at : !a.on && b.on);
+
+// La liste fusionnée : les ids dont le geste gagnant est « posé ».
+function fusionner(tables, cle) {
+	const best = new Map();
+	for (const t of tables) for (const [k, g] of Object.entries(t[cle] || {})) {
+		const cur = best.get(k);
+		if (!cur || gagne(g, cur)) best.set(k, g);
+	}
+	return [...best].filter(([, g]) => g.on).sort(([ka, a], [kb, b]) => a.at - b.at || Number(ka) - Number(kb)).map(([k]) => Number(k));
+}
+
+// `own` avec un geste de plus, daté après tout geste connu pour cet id.
+function poser(own, autres, cle, id, on, now) {
+	const deja = [own, ...autres].reduce((m, t) => Math.max(m, ((t[cle] || {})[String(id)] || {}).at || 0), 0);
+	const l = { ...(own[cle] || {}) };
+	delete l[String(id)];
+	l[String(id)] = { on, at: Math.max(now, deja + 1) };
+	const gardes = Object.entries(l).sort(([, a], [, b]) => b.at - a.at).slice(0, MAX_ENTREES);
+	return { ...own, [cle]: Object.fromEntries(gardes) };
+}
+
+// Tous les fichiers d'appareil : le sien (`own`, null s'il n'existe pas) et les autres.
+function lireListesPartagees(vaultRoot, appareil, now = Date.now()) {
+	const dir = path.join(vaultRoot, '.neo-quiz', 'moodle');
+	const lire = (abs) => {
+		try {
+			const st = fs.statSync(abs);
+			if (!st.isFile() || st.size > MAX_FICHIER_LISTES) return {};
+			return lireTable(JSON.parse(fs.readFileSync(abs, 'utf8')), now + 24 * 3600 * 1000);
+		} catch { return {}; }
+	};
+	const ownNom = `${appareil}.json`;
+	const own = fs.existsSync(path.join(dir, ownNom)) ? lire(path.join(dir, ownNom)) : null;
+	let noms = [];
+	try { noms = fs.readdirSync(dir); } catch { /* aucun appareil n'a encore écrit */ }
+	const autres = noms.filter((n) => n !== ownNom && n.endsWith('.json') && !n.startsWith('.') && !n.includes('.sync-conflict-'))
+		.sort().slice(0, MAX_FICHIERS_LISTES).map((n) => lire(path.join(dir, n)));
+	return { own, autres };
+}
+
+// Écrit le fichier de CET appareil (jamais celui d'un autre), par fichier temporaire puis renommage.
+function ecrireListesPartagees(vaultRoot, appareil, table) {
+	const dir = path.join(vaultRoot, '.neo-quiz', 'moodle');
+	fs.mkdirSync(dir, { recursive: true });
+	const cible = path.join(dir, `${appareil}.json`);
+	const tmp = `${cible}.${process.pid}.tmp`;
+	fs.writeFileSync(tmp, JSON.stringify({ v: 1, lists: table }, null, '\t'));
+	fs.renameSync(tmp, cible);
+}
+
 module.exports = {
+	estLie, lireTable, fusionner, poser, lireListesPartagees, ecrireListesPartagees,
 	ROOT, MoodleError, TokenError,
 	sanitize, sectionDir, fileDir, seanceNumber, nameGenericSections, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
 	parseSubmission, depositState, formatRemaining, pendingDeposits, compareDeposits,
@@ -724,6 +815,7 @@ const SEEN_KEY = 'moodle-sync-seen-deposits';        // devoirs déjà vus : les
 const IGNORED_KEY = 'moodle-sync-ignored-deposits';  // devoirs masqués du bandeau (autre groupe…)
 const FAVORITES_KEY = 'moodle-sync-favorite-courses'; // modules épinglés en tête de liste
 const BY_SECTION_KEY = 'moodle-sync-by-section';     // un sous-dossier par section Moodle (actif par défaut)
+const DEVICE_KEY = 'moodle-sync-device';             // nom du fichier de CET appareil dans .neo-quiz/moodle/ (mode lié)
 const COURSE_URL = /^https:\/\/moodle\.myefrei\.fr\/course\/view\.php\?(?:[^#]*&)?id=(\d+)/;
 // Synchro de fond, tant qu'Obsidian tourne. Moodle ne publie pas de limite de débit : 60 s est la
 // cible demandée, et le recul après erreur (jusqu'à BG_MAX_BACKOFF) sert de marge.
@@ -2059,6 +2151,12 @@ class MoodleSyncSettingTab extends PluginSettingTab {
 			}).catch(() => {});
 		}
 
+		if (this.plugin.lie) {
+			new Setting(containerEl)
+				.setName('Lié à Neo Quiz')
+				.setDesc("Ce vault est le dossier de Neo Quiz : les favoris et les devoirs masqués sont les mêmes que dans l'app, et c'est elle qui synchronise en arrière-plan. Les boutons du plugin restent utilisables à la main.");
+		}
+
 		new Setting(containerEl)
 			.setName('Compte Moodle')
 			.setDesc(t
@@ -2163,6 +2261,10 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		this.coursesPromise = null;
 		this.scans = new Map();       // id du cours -> { state, result, error, promise }
 		this.listeners = new Set();   // fenêtres ouvertes, prévenues à chaque changement
+		/* Mode lié : le vault est la racine de Neo Quiz (`.neo-quiz/`). Favoris et devoirs masqués
+		   sont alors ceux de Neo Quiz, et la synchro de fond est la sienne (pas de doublon de
+		   requêtes vers l'école). Ailleurs, le plugin reste autonome, comme avant. */
+		this.lie = this.engine.estLie(this.vaultRoot);
 		const cached = this.app.loadLocalStorage(COURSES_KEY);
 		this.courses = Array.isArray(cached) && cached.length ? this.engine.locate(cached, this.vaultRoot) : null;
 
@@ -2175,7 +2277,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		this.registerObsidianProtocolHandler('moodle-sync', (params) => this.openModal(params.url));
 		this.addRibbonIcon('cloud-download', 'Moodle Sync', () => this.openModal());
 		this.addSettingTab(new MoodleSyncSettingTab(this.app, this));
-		this.app.workspace.onLayoutReady(() => this.startBackground());
+		if (!this.lie) this.app.workspace.onLayoutReady(() => this.startBackground());
 		this.register(() => this.stopBackground());
 	}
 
@@ -2212,15 +2314,41 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 		if (seen.size !== before || !this.hasSeenDeposits()) this.app.saveLocalStorage(SEEN_KEY, [...seen]);
 	}
 
+	// --- listes : locales, ou partagées avec Neo Quiz en mode lié -----------------
+
+	// Le nom du fichier de cet appareil dans `.neo-quiz/moodle/`, tiré une fois.
+	appareil() {
+		let id = this.app.loadLocalStorage(DEVICE_KEY);
+		if (typeof id !== 'string' || !/^obsidian-[0-9a-f-]{36}$/.test(id)) {
+			id = `obsidian-${crypto.randomUUID()}`;
+			this.app.saveLocalStorage(DEVICE_KEY, id);
+		}
+		return id;
+	}
+
+	listePartagee(cle) {
+		const { own, autres } = this.engine.lireListesPartagees(this.vaultRoot, this.appareil());
+		return new Set(this.engine.fusionner([own || {}, ...autres], cle));
+	}
+
+	poserPartage(cle, id, on) {
+		const appareil = this.appareil();
+		const { own, autres } = this.engine.lireListesPartagees(this.vaultRoot, appareil);
+		this.engine.ecrireListesPartagees(this.vaultRoot, appareil, this.engine.poser(own || {}, autres, cle, id, on, Date.now()));
+	}
+
 	ignoredDeposits() {
+		if (this.lie) return this.listePartagee('devoirsIgnores');
 		return new Set(this.app.loadLocalStorage(IGNORED_KEY) || []);
 	}
 
 	favoriteCourses() {
+		if (this.lie) return this.listePartagee('favoris');
 		return new Set(this.app.loadLocalStorage(FAVORITES_KEY) || []);
 	}
 
 	setFavorite(id, on) {
+		if (this.lie) { this.poserPartage('favoris', id, on); return; }
 		const set = this.favoriteCourses();
 		if (on) set.add(id); else set.delete(id);
 		this.app.saveLocalStorage(FAVORITES_KEY, [...set]);
@@ -2228,6 +2356,7 @@ module.exports = class MoodleSyncPlugin extends Plugin {
 
 	// Masquer un devoir d'un autre groupe (ou le réafficher après une erreur).
 	setDepositHidden(id, hidden) {
+		if (this.lie) { this.poserPartage('devoirsIgnores', id, hidden); return; }
 		const set = this.ignoredDeposits();
 		if (hidden) set.add(id); else set.delete(id);
 		this.app.saveLocalStorage(IGNORED_KEY, [...set]);

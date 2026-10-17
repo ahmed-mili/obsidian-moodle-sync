@@ -19,6 +19,10 @@ BRAT garde le plugin à jour à chaque nouvelle version. Si le plugin est déjà
 
 Sur chaque ordinateur, ouvrir Moodle Sync puis **Se connecter** avec son compte Efrei. La connexion, les favoris et les devoirs masqués restent propres à chaque appareil.
 
+### Avec Neo Quiz
+
+Si le vault est le dossier de l'app [Neo Quiz](https://neo-quiz.github.io) (il contient un dossier `.neo-quiz`), le plugin passe tout seul en **mode lié** : les favoris et les devoirs masqués sont ceux de Neo Quiz, partagés entre tous tes appareils, et la synchro en arrière-plan est faite par l'app (le plugin n'en lance pas une seconde). Partout ailleurs, il reste autonome : Neo Quiz n'est jamais nécessaire.
+
 Les devoirs se masquent avec l'icône œil. Pour les réafficher, aller dans **Paramètres → Moodle Sync → Devoirs masqués**.
 
 ### Installation manuelle

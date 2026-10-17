@@ -693,7 +693,98 @@ async function downloadFiles(client, jobs, onDone = () => {}) {
 	})));
 }
 
+// ------------------------------------------------------------------- mode lié à Neo Quiz
+// Un vault qui contient `.neo-quiz/` est la racine de l'app Neo Quiz : le plugin y partage ses
+// listes (favoris, devoirs masqués) avec elle, dans les mêmes fichiers et avec la même règle
+// (`apps/windows/electron/moodle/listes.ts` de Neo Quiz) : un fichier par appareil,
+// `.neo-quiz/moodle/<appareil>.json`, chaque geste daté, le plus récent l'emporte, un retrait
+// reste une pierre tombale. Hors d'un tel vault, rien de ceci ne sert : le plugin est autonome.
+
+const LISTES_PARTAGEES = ['favoris', 'exclus', 'extra', 'devoirsIgnores', 'devoirsVus'];
+const MAX_ENTREES = 1000;
+const MAX_FICHIER_LISTES = 256 * 1024;
+const MAX_FICHIERS_LISTES = 64;
+
+function estLie(vaultRoot) {
+	try { return fs.statSync(path.join(vaultRoot, '.neo-quiz')).isDirectory(); } catch { return false; }
+}
+
+// Un fichier d'appareil lu du dossier synchronisé : tout ce qui est mal formé est écarté. Un geste
+// daté après `maxAt` (horloge fausse, ou date forgée qui gagnerait toujours) aussi.
+function lireTable(brut, maxAt = Number.MAX_SAFE_INTEGER) {
+	const out = {};
+	const listes = brut && typeof brut === 'object' && !Array.isArray(brut) ? brut.lists : null;
+	if (!listes || typeof listes !== 'object' || Array.isArray(listes)) return out;
+	for (const cle of LISTES_PARTAGEES) {
+		const l = listes[cle];
+		if (!l || typeof l !== 'object' || Array.isArray(l)) continue;
+		const t = {};
+		let n = 0;
+		for (const [k, g] of Object.entries(l)) {
+			if (n >= MAX_ENTREES) break;
+			if (!/^[1-9][0-9]{0,15}$/.test(k) || !Number.isSafeInteger(Number(k)) || !g || typeof g !== 'object') continue;
+			if (typeof g.on !== 'boolean' || typeof g.at !== 'number' || !Number.isFinite(g.at) || g.at < 0 || g.at > maxAt) continue;
+			t[k] = { on: g.on, at: g.at };
+			n++;
+		}
+		out[cle] = t;
+	}
+	return out;
+}
+
+const gagne = (a, b) => (a.at !== b.at ? a.at > b.at : !a.on && b.on);
+
+// La liste fusionnée : les ids dont le geste gagnant est « posé ».
+function fusionner(tables, cle) {
+	const best = new Map();
+	for (const t of tables) for (const [k, g] of Object.entries(t[cle] || {})) {
+		const cur = best.get(k);
+		if (!cur || gagne(g, cur)) best.set(k, g);
+	}
+	return [...best].filter(([, g]) => g.on).sort(([ka, a], [kb, b]) => a.at - b.at || Number(ka) - Number(kb)).map(([k]) => Number(k));
+}
+
+// `own` avec un geste de plus, daté après tout geste connu pour cet id.
+function poser(own, autres, cle, id, on, now) {
+	const deja = [own, ...autres].reduce((m, t) => Math.max(m, ((t[cle] || {})[String(id)] || {}).at || 0), 0);
+	const l = { ...(own[cle] || {}) };
+	delete l[String(id)];
+	l[String(id)] = { on, at: Math.max(now, deja + 1) };
+	const gardes = Object.entries(l).sort(([, a], [, b]) => b.at - a.at).slice(0, MAX_ENTREES);
+	return { ...own, [cle]: Object.fromEntries(gardes) };
+}
+
+// Tous les fichiers d'appareil : le sien (`own`, null s'il n'existe pas) et les autres.
+function lireListesPartagees(vaultRoot, appareil, now = Date.now()) {
+	const dir = path.join(vaultRoot, '.neo-quiz', 'moodle');
+	const lire = (abs) => {
+		try {
+			const st = fs.statSync(abs);
+			if (!st.isFile() || st.size > MAX_FICHIER_LISTES) return {};
+			return lireTable(JSON.parse(fs.readFileSync(abs, 'utf8')), now + 24 * 3600 * 1000);
+		} catch { return {}; }
+	};
+	const ownNom = `${appareil}.json`;
+	const own = fs.existsSync(path.join(dir, ownNom)) ? lire(path.join(dir, ownNom)) : null;
+	let noms = [];
+	try { noms = fs.readdirSync(dir); } catch { /* aucun appareil n'a encore écrit */ }
+	const autres = noms.filter((n) => n !== ownNom && n.endsWith('.json') && !n.startsWith('.') && !n.includes('.sync-conflict-'))
+		.sort().slice(0, MAX_FICHIERS_LISTES).map((n) => lire(path.join(dir, n)));
+	return { own, autres };
+}
+
+// Écrit le fichier de CET appareil (jamais celui d'un autre), par fichier temporaire puis renommage.
+function ecrireListesPartagees(vaultRoot, appareil, table) {
+	const dir = path.join(vaultRoot, '.neo-quiz', 'moodle');
+	fs.mkdirSync(dir, { recursive: true });
+	const cible = path.join(dir, `${appareil}.json`);
+	const tmp = `${cible}.${process.pid}.tmp`;
+	fs.writeFileSync(tmp, JSON.stringify({ v: 1, lists: table }, null, '\t'));
+	fs.renameSync(tmp, cible);
+}
+
 module.exports = {
+	estLie, lireTable, fusionner, poser, lireListesPartagees, ecrireListesPartagees,
 	ROOT, MoodleError, TokenError,
 	sanitize, sectionDir, fileDir, seanceNumber, nameGenericSections, cleanName, pickTitle, prettyName, decodeEntities, parseCourse, locate, flattenContents, dedupe,
 	parseSubmission, depositState, formatRemaining, pendingDeposits, compareDeposits,
